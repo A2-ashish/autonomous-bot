@@ -196,24 +196,43 @@ setInterval(() => {
 // -----------------------------------------
 // AUTONOMOUS BOT EXTENSION
 // -----------------------------------------
+
+// Deep element search that properly traverses Shadow DOM
 function getDeepElements(tagName = '*') {
   const elements = [];
-  const activeElements = [document.body];
+  const queue = [document.body];
   
-  while (activeElements.length > 0) {
-    const el = activeElements.shift();
-    if (el) {
-       if (tagName === '*' || el.tagName.toLowerCase() === tagName) elements.push(el);
-       if (el.shadowRoot) activeElements.push(el.shadowRoot);
-       if (el.children) {
-         for (let i = 0; i < el.children.length; i++) {
-           activeElements.push(el.children[i]);
-         }
-       }
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (!node) continue;
+
+    // Only match actual Elements (not ShadowRoot/DocumentFragment)
+    if (node.tagName) {
+      if (tagName === '*' || node.tagName.toLowerCase() === tagName) {
+        elements.push(node);
+      }
+    }
+
+    // Dive into shadow DOM
+    if (node.shadowRoot) {
+      queue.push(node.shadowRoot);
+    }
+
+    // Process children (works for both Element and ShadowRoot)
+    const children = node.children || node.childNodes;
+    if (children) {
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].nodeType === 1 || children[i].shadowRoot) { // ELEMENT_NODE
+          queue.push(children[i]);
+        }
+      }
     }
   }
   return elements;
 }
+
+// Track whether we already triggered scrape for the current page
+let botLastScrapeUrl = '';
 
 function runAutonomousBotLoop() {
   chrome.storage.sync.get(["autonomousBot"], (result) => {
@@ -230,9 +249,42 @@ function runAutonomousBotLoop() {
     if (window.netAcadBotState && window.netAcadBotState.lastQuizProcessedAt > 0) {
       const elapsed = Date.now() - window.netAcadBotState.lastQuizProcessedAt;
       if (elapsed < cooldown) {
-        console.log(`NetAcad Bot: ⏳ Cooldown (${Math.round((cooldown - elapsed) / 1000)}s remaining after quiz answer selection)...`);
+        console.log(`NetAcad Bot: ⏳ Cooldown (${Math.round((cooldown - elapsed) / 1000)}s remaining)...`);
         return;
       }
+    }
+
+    // 0. AUTO-SCRAPE: If quiz elements exist but we haven't scraped yet, trigger scraping
+    try {
+      const appRoot = document.querySelector("app-root");
+      if (appRoot && appRoot.shadowRoot) {
+        const pageView = appRoot.shadowRoot.querySelector("page-view");
+        if (pageView && pageView.shadowRoot) {
+          const articleViews = pageView.shadowRoot.querySelectorAll("article-view");
+          let hasMcq = false;
+          articleViews.forEach(av => {
+            if (av.shadowRoot) {
+              av.shadowRoot.querySelectorAll("block-view").forEach(bv => {
+                if (bv.shadowRoot && bv.shadowRoot.querySelector("mcq-view")) {
+                  hasMcq = true;
+                }
+              });
+            }
+          });
+
+          const currentUrl = window.location.href;
+          if (hasMcq && currentUrl !== botLastScrapeUrl) {
+            console.log("NetAcad Bot: 🎯 Quiz detected! Auto-triggering scrapeData()...");
+            botLastScrapeUrl = currentUrl;
+            if (typeof window.scrapeData === "function") {
+              window.scrapeData();
+            }
+            return; // Let the scraper do its job, bot will resume on next cycle
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("NetAcad Bot: Error during auto-scrape check:", e);
     }
 
     // 1. Check for Videos and fast-forward
@@ -246,49 +298,56 @@ function runAutonomousBotLoop() {
     });
 
     // 2. Look for Submit, Start, or Next Buttons
-    const buttons = getDeepElements('button');
-    let submitClicked = false;
+    const allClickables = getDeepElements('button');
+    // Also check for <a> tags and elements with role="button" that act as buttons
+    getDeepElements('a').forEach(a => allClickables.push(a));
+    getDeepElements('*').filter(el => el.getAttribute && el.getAttribute('role') === 'button').forEach(el => allClickables.push(el));
 
-    for (const btn of buttons) {
+    let actionTaken = false;
+
+    for (const btn of allClickables) {
       const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
       const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
       const title = (btn.getAttribute('title') || '').toLowerCase();
       
       const isStart = text === 'start' || text.includes('begin');
       const isNext = text === 'next' || text.includes('continue') || ariaLabel.includes('next') || title.includes('next');
-      const isSubmit = text === 'submit' || text.includes('submit exam') || text.includes('submit test');
+      const isSubmit = text === 'submit' || text.includes('submit exam') || text.includes('submit test') || text.includes('submit quiz');
       
       if (isStart || isNext || isSubmit) {
-        
-        // If the button is disabled, it might be waiting for the "Yes, confirm my submission" checkbox
-        const isDisabled = btn.disabled || btn.classList.contains('disabled');
+        const isDisabled = btn.disabled || btn.classList.contains('disabled') || btn.getAttribute('aria-disabled') === 'true';
         
         if (isDisabled && isSubmit) {
+           // Look for the confirmation checkbox ("Yes, confirm my submission")
            const checkboxes = getDeepElements('input').filter(i => i.type === 'checkbox' && !i.checked);
            checkboxes.forEach(cb => {
-              // Ensure we only click confirmation checkboxes, not test answers!
-              const parentText = (cb.parentElement.innerText || cb.parentElement.textContent || '').toLowerCase();
+              const parentText = (cb.parentElement ? cb.parentElement.innerText || cb.parentElement.textContent || '' : '').toLowerCase();
               if (parentText.includes('confirm') || parentText.includes('yes')) {
-                  console.log("NetAcad Bot: Clicking confirmation checkbox.");
+                  console.log("NetAcad Bot: ✅ Clicking confirmation checkbox.");
                   cb.click();
-                  submitClicked = true; // Prevent scrolling
+                  actionTaken = true;
               }
            });
            
-           if (submitClicked) break; // Checkbox clicked, wait for next loop to click the now-enabled submit button
+           if (actionTaken) break;
 
         } else if (!isDisabled) {
-           console.log(`NetAcad Bot: Found enabled interactive button (Start/Next/Submit), clicking it!`);
+           console.log(`NetAcad Bot: 👆 Clicking '${text || ariaLabel || 'button'}' (${btn.tagName})`);
            btn.click();
-           submitClicked = true;
+           actionTaken = true;
+
+           // If we clicked Start, reset scrape tracker so we scrape the new quiz
+           if (isStart) {
+             botLastScrapeUrl = '';
+           }
+
            break;
         }
       }
     }
 
-    // 3. Auto Scroll (if nothing else happened and no pending test)
-    if (!submitClicked) {
-      // scroll down slowly to trigger any lazy loads or just move through content
+    // 3. Auto Scroll (if nothing else happened)
+    if (!actionTaken) {
       window.scrollBy({ top: window.innerHeight / 2, left: 0, behavior: 'smooth' });
     }
   });
