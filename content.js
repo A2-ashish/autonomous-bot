@@ -1,5 +1,11 @@
 console.log("NetAcad Scraper content script loaded and ready.");
 
+// Global bot state machine — shared across content.js and scraper.js
+window.netAcadBotState = window.netAcadBotState || {
+  isProcessingQuiz: false,
+  lastQuizProcessedAt: 0,
+};
+
 let debounceTimeout;
 function debouncedScrape() {
   clearTimeout(debounceTimeout);
@@ -186,3 +192,107 @@ setInterval(() => {
       new Date().toLocaleTimeString(),
   );
 }, 30000);
+
+// -----------------------------------------
+// AUTONOMOUS BOT EXTENSION
+// -----------------------------------------
+function getDeepElements(tagName = '*') {
+  const elements = [];
+  const activeElements = [document.body];
+  
+  while (activeElements.length > 0) {
+    const el = activeElements.shift();
+    if (el) {
+       if (tagName === '*' || el.tagName.toLowerCase() === tagName) elements.push(el);
+       if (el.shadowRoot) activeElements.push(el.shadowRoot);
+       if (el.children) {
+         for (let i = 0; i < el.children.length; i++) {
+           activeElements.push(el.children[i]);
+         }
+       }
+    }
+  }
+  return elements;
+}
+
+function runAutonomousBotLoop() {
+  chrome.storage.sync.get(["autonomousBot"], (result) => {
+    if (!result.autonomousBot) return;
+
+    // STATE MACHINE GUARD: Do NOT click anything while Gemini is processing a quiz
+    if (window.netAcadBotState && window.netAcadBotState.isProcessingQuiz) {
+      console.log("NetAcad Bot: ⏸ Paused — waiting for Gemini AI to finish answering the quiz...");
+      return;
+    }
+
+    // COOLDOWN: After quiz is done, wait 2 seconds before clicking submit to let DOM update
+    const cooldown = 2000;
+    if (window.netAcadBotState && window.netAcadBotState.lastQuizProcessedAt > 0) {
+      const elapsed = Date.now() - window.netAcadBotState.lastQuizProcessedAt;
+      if (elapsed < cooldown) {
+        console.log(`NetAcad Bot: ⏳ Cooldown (${Math.round((cooldown - elapsed) / 1000)}s remaining after quiz answer selection)...`);
+        return;
+      }
+    }
+
+    // 1. Check for Videos and fast-forward
+    const videos = getDeepElements('video');
+    videos.forEach(video => {
+      if (video.duration > 0 && Math.abs(video.currentTime - video.duration) > 1) {
+        console.log("NetAcad Bot: Fast forwarding video to end.");
+        video.currentTime = video.duration - 0.5;
+        video.play().catch(e => console.warn(e));
+      }
+    });
+
+    // 2. Look for Submit, Start, or Next Buttons
+    const buttons = getDeepElements('button');
+    let submitClicked = false;
+
+    for (const btn of buttons) {
+      const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+      const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const title = (btn.getAttribute('title') || '').toLowerCase();
+      
+      const isStart = text === 'start' || text.includes('begin');
+      const isNext = text === 'next' || text.includes('continue') || ariaLabel.includes('next') || title.includes('next');
+      const isSubmit = text === 'submit' || text.includes('submit exam') || text.includes('submit test');
+      
+      if (isStart || isNext || isSubmit) {
+        
+        // If the button is disabled, it might be waiting for the "Yes, confirm my submission" checkbox
+        const isDisabled = btn.disabled || btn.classList.contains('disabled');
+        
+        if (isDisabled && isSubmit) {
+           const checkboxes = getDeepElements('input').filter(i => i.type === 'checkbox' && !i.checked);
+           checkboxes.forEach(cb => {
+              // Ensure we only click confirmation checkboxes, not test answers!
+              const parentText = (cb.parentElement.innerText || cb.parentElement.textContent || '').toLowerCase();
+              if (parentText.includes('confirm') || parentText.includes('yes')) {
+                  console.log("NetAcad Bot: Clicking confirmation checkbox.");
+                  cb.click();
+                  submitClicked = true; // Prevent scrolling
+              }
+           });
+           
+           if (submitClicked) break; // Checkbox clicked, wait for next loop to click the now-enabled submit button
+
+        } else if (!isDisabled) {
+           console.log(`NetAcad Bot: Found enabled interactive button (Start/Next/Submit), clicking it!`);
+           btn.click();
+           submitClicked = true;
+           break;
+        }
+      }
+    }
+
+    // 3. Auto Scroll (if nothing else happened and no pending test)
+    if (!submitClicked) {
+      // scroll down slowly to trigger any lazy loads or just move through content
+      window.scrollBy({ top: window.innerHeight / 2, left: 0, behavior: 'smooth' });
+    }
+  });
+}
+
+// Check every 3 seconds
+setInterval(runAutonomousBotLoop, 3000);

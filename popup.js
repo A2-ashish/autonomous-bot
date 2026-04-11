@@ -7,9 +7,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const processOnSwitchToggle = document.getElementById(
     "processOnSwitchToggle",
   );
+  const autonomousBotToggle = document.getElementById("autonomousBotToggle");
 
   chrome.storage.sync.get(
-    ["geminiApiKey", "showAnswers", "processOnSwitch"],
+    ["geminiApiKey", "showAnswers", "processOnSwitch", "autonomousBot"],
     (result) => {
       if (result.geminiApiKey) {
         apiKeyInput.value = result.geminiApiKey;
@@ -28,6 +29,12 @@ document.addEventListener("DOMContentLoaded", () => {
       } else {
         processOnSwitchToggle.checked = true;
       }
+
+      if (typeof result.autonomousBot === "boolean") {
+        autonomousBotToggle.checked = result.autonomousBot;
+      } else {
+        autonomousBotToggle.checked = false;
+      }
       setTimeout(() => {
         if (
           statusDiv.textContent === "API Key loaded." ||
@@ -44,6 +51,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   processOnSwitchToggle.addEventListener("change", () => {
     chrome.storage.sync.set({ processOnSwitch: processOnSwitchToggle.checked });
+  });
+
+  autonomousBotToggle.addEventListener("change", () => {
+    chrome.storage.sync.set({ autonomousBot: autonomousBotToggle.checked });
   });
 
   saveKeyButton.addEventListener("click", () => {

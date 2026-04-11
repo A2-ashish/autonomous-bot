@@ -38,6 +38,13 @@ function createAiAssistantUI(uiContainerId, index) {
     (refreshButton.style.backgroundColor = "#007bff");
   uiContainer.appendChild(refreshButton);
 
+  // In autonomous mode, hide the UI entirely so it looks like a native user
+  chrome.storage.sync.get(["autonomousBot"], (result) => {
+    if (result.autonomousBot) {
+      uiContainer.style.display = "none";
+    }
+  });
+
   return { uiContainer, aiAnswerDisplay, refreshButton };
 }
 
@@ -537,6 +544,14 @@ async function handleRefreshAction(questionText, answerTexts, apiKey, aiAnswerDi
       aiAnswerDisplay.textContent = "AI Suggestion: No valid answer content received (single refresh).";
       console.warn(`NetAcad UI: Q${index + 1} (single refresh) AI response was empty or only whitespace after processing: '${rawAiResponse}'`);
     }
+
+    // Call autoselect if the bot is active
+    chrome.storage.sync.get(["autonomousBot"], (result) => {
+      if (result.autonomousBot) {
+        autoSelectMatchingAnswers(extractQuestionAndAnswers(aiAnswerDisplay.closest('mcq-view'), index).answerElements, individualAnswers);
+      }
+    });
+
   } else if (rawAiResponse && rawAiResponse.toLowerCase().startsWith("error:")) {
     // Improved error handling
     const friendlyMsg = getFriendlyGeminiErrorMessage(rawAiResponse);
@@ -616,8 +631,20 @@ async function processSingleQuestion(mcqViewElement, index, apiKey, preFetchedAi
         } else {
            aiAnswerDisplay.textContent = "AI Suggestion: Received multiple answer format but no valid content.";
         }
+        
+        chrome.storage.sync.get(["autonomousBot"], (result) => {
+          if (result.autonomousBot) {
+             autoSelectMatchingAnswers(answerElements, individualAnswers);
+          }
+        });
+
       } else {
         aiAnswerDisplay.textContent = `AI Suggestion: ${preFetchedAiAnswer}`;
+        chrome.storage.sync.get(["autonomousBot"], (result) => {
+          if (result.autonomousBot) {
+             autoSelectMatchingAnswers(answerElements, [preFetchedAiAnswer]);
+          }
+        });
       }
     }
   } else { // No pre-fetched answer, proceed with individual fetch if Q/A is valid
@@ -636,4 +663,46 @@ async function processSingleQuestion(mcqViewElement, index, apiKey, preFetchedAi
       console.debug(`NetAcad UI: Q${index + 1} - Initial AI call skipped due to extraction issues or missing API key. Message: ${aiAnswerDisplay.textContent}`);
     }
   }
+}
+
+// -----------------------------------------
+// AUTONOMOUS BOT EXTENSION
+// -----------------------------------------
+function autoSelectMatchingAnswers(answerElements, individualAnswers) {
+  if (!answerElements || answerElements.length === 0 || !individualAnswers || individualAnswers.length === 0) return;
+
+  const normalizedIndividualAnswers = individualAnswers.map(ans => ans.toLowerCase().trim().replace(/[\s\W]+/g, ''));
+  let checkedCount = 0;
+
+  answerElements.forEach(answerEl => {
+    const text = answerEl.innerText.trim();
+    if (!text) return;
+
+    const normalizedText = text.toLowerCase().trim().replace(/[\s\W]+/g, '');
+
+    const isMatch = normalizedIndividualAnswers.some(aiAns => 
+      aiAns === normalizedText || 
+      aiAns.includes(normalizedText) || 
+      normalizedText.includes(aiAns)
+    );
+
+    if (isMatch) {
+      console.debug(`NetAcad UI: Bot Auto-Selecting matching choice: "${text}"`);
+      // Find the input element to specifically target it
+      const parentContainer = answerEl.closest('.mcq__item') || answerEl.parentNode;
+      const inputChild = parentContainer ? parentContainer.querySelector('input[type="radio"], input[type="checkbox"]') : null;
+      
+      if (inputChild) {
+        if (!inputChild.checked) {
+          inputChild.click();
+          checkedCount++;
+        }
+      } else {
+        answerEl.click();
+        checkedCount++;
+      }
+    }
+  });
+
+  return checkedCount;
 }

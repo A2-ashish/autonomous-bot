@@ -68,6 +68,12 @@ async function scrapeData(currentAttempt = 1) {
     `NetAcad Scraper (scraper.js): Found ${mcqViewElements.length} mcq-view element(s). Attempting to process...`
   );
 
+  // LOCK the bot loop — prevent it from clicking Submit/Next while we process
+  if (window.netAcadBotState) {
+    window.netAcadBotState.isProcessingQuiz = true;
+    console.debug("NetAcad Scraper: 🔒 Bot state LOCKED (isProcessingQuiz = true)");
+  }
+
   if (!apiKey) {
     console.warn("NetAcad Scraper (scraper.js): Gemini API Key not found. Displaying message in UI.");
     for (const [index, mcqViewElement] of mcqViewElements.entries()) {
@@ -148,6 +154,13 @@ async function scrapeData(currentAttempt = 1) {
     console.debug("NetAcad Scraper (scraper.js): No valid questions extracted to send for batch processing.");
     // If there were mcqViewElements but none yielded valid Q&A, their UIs would have been handled
     // in the extraction loop above, displaying individual extraction errors via processSingleQuestion.
+  }
+
+  // UNLOCK the bot loop — quiz has been fully processed and answers selected
+  if (window.netAcadBotState) {
+    window.netAcadBotState.isProcessingQuiz = false;
+    window.netAcadBotState.lastQuizProcessedAt = Date.now();
+    console.debug("NetAcad Scraper: 🔓 Bot state UNLOCKED (isProcessingQuiz = false). Answers have been selected.");
   }
 
   return true;
