@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/logo.png" alt="NetAcad Autonomous Bot Logo" width="200"/>
+</p>
+
 # NetAcad Autonomous Bot — Features & Usage Guide
 
 > A fully autonomous AI-powered browser extension that navigates Cisco NetAcad courses, answers quizzes, skips videos, and submits assessments — all without human intervention.
