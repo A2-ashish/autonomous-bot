@@ -3,40 +3,54 @@ const MAX_SCRAPE_ATTEMPTS = 10;
 const SCRAPE_RETRY_DELAY_MS = 1500;
 
 async function scrapeData(currentAttempt = 1) {
+  // STRICT Concurrency lock: Prevent multiple overlapping API calls which cause instant 429 Burst Limits
+  if (currentAttempt === 1 && window.netAcadBotState) {
+    if (window.netAcadBotState.isProcessingQuiz) {
+      console.debug("NetAcad Scraper: Already processing quiz. Ignoring overlapping scrapeData call.");
+      return false;
+    }
+    // Lock IMMEDIATELY before any async await yields the execution thread
+    window.netAcadBotState.isProcessingQuiz = true;
+  }
+
   console.debug(
     `NetAcad Scraper (scraper.js): scrapeData attempt #${currentAttempt} of ${MAX_SCRAPE_ATTEMPTS}`
   );
 
-  const storedData = await chrome.storage.sync.get(["geminiApiKey"]);
-  const apiKey = storedData.geminiApiKey;
+  // Use rotating key system — falls back to single key for backward compatibility
+  const keyInfo = await getActiveApiKey();
+  const apiKey = keyInfo ? keyInfo.key : null;
+  if (keyInfo && keyInfo.total > 1) {
+    console.debug(`NetAcad Scraper: Using API key #${keyInfo.index + 1} of ${keyInfo.total}`);
+  }
 
   let mcqViewElements = [];
   let earlyExitReason = "";
 
   try {
-    const appRoot = document.querySelector("app-root");
-    if (appRoot && appRoot.shadowRoot) {
-      const pageView = appRoot.shadowRoot.querySelector("page-view");
-      if (pageView && pageView.shadowRoot) {
-        const articleViews = pageView.shadowRoot.querySelectorAll("article-view");
-        if (articleViews && articleViews.length > 0) {
-          articleViews.forEach((articleView, i) => {
-            if (articleView.shadowRoot) {
-              const blockViews = articleView.shadowRoot.querySelectorAll("block-view");
-              blockViews.forEach((blockView, j) => {
-                if (blockView.shadowRoot) {
-                  const mcqView = blockView.shadowRoot.querySelector("mcq-view");
-                  if (mcqView) mcqViewElements.push(mcqView);
-                }
-              });
-            }
-          });
-          if (mcqViewElements.length === 0) earlyExitReason = "Found article-view(s) but no mcq-view elements.";
-        } else earlyExitReason = "page-view found, but no article-view elements.";
-      } else earlyExitReason = appRoot.shadowRoot.querySelector("page-view") ? "page-view found, but no shadowRoot." : "page-view not found in app-root.";
-    } else earlyExitReason = document.querySelector("app-root") ? "app-root found, but no shadowRoot." : "app-root not found.";
+    // 1. Broad search for mcq-view anywhere
+    if (window.getDeepElements) {
+      mcqViewElements = window.getDeepElements("mcq-view");
+    }
+
+    // 2. Generic Quiz Fallback: If no mcq-view, look for any radio/checkbox inputs or roles
+    if (mcqViewElements.length === 0 && window.getDeepElements) {
+      const inputs = window.getDeepElements('input, [role="radio"], [role="checkbox"]').filter(i => {
+        if (i.tagName.toLowerCase() === 'input') return i.type === 'radio' || i.type === 'checkbox';
+        return true;
+      });
+      if (inputs.length > 0) {
+        // Use the document body as a pseudo-mcqView to trigger the generic extraction in ui.js
+        mcqViewElements = [document.body];
+        console.log("NetAcad Scraper: Falling back to generic input extraction.");
+      }
+    }
+
+    if (mcqViewElements.length === 0) {
+      earlyExitReason = "No mcq-view or generic quiz inputs found.";
+    }
   } catch (e) {
-    earlyExitReason = "Exception during shadow DOM traversal.";
+    earlyExitReason = "Exception during quiz extraction.";
     console.error(`NetAcad Scraper (scraper.js): ${earlyExitReason}`, e);
   }
 
@@ -61,18 +75,13 @@ async function scrapeData(currentAttempt = 1) {
       return false;
     }
     console.warn(`NetAcad Scraper (scraper.js): Max retry attempts reached. Failed to find mcq-view elements.`);
+    if (window.netAcadBotState) window.netAcadBotState.isProcessingQuiz = false; // Unlock on failure
     return false;
   }
 
   console.debug(
     `NetAcad Scraper (scraper.js): Found ${mcqViewElements.length} mcq-view element(s). Attempting to process...`
   );
-
-  // LOCK the bot loop — prevent it from clicking Submit/Next while we process
-  if (window.netAcadBotState) {
-    window.netAcadBotState.isProcessingQuiz = true;
-    console.debug("NetAcad Scraper: 🔒 Bot state LOCKED (isProcessingQuiz = true)");
-  }
 
   if (!apiKey) {
     console.warn("NetAcad Scraper (scraper.js): Gemini API Key not found. Displaying message in UI.");
@@ -88,10 +97,10 @@ async function scrapeData(currentAttempt = 1) {
     // extractQuestionAndAnswers is in ui.js and should be globally available.
     // It returns { questionText, answerElements, questionTextElement }
     if (typeof extractQuestionAndAnswers !== 'function') {
-        console.error("NetAcad Scraper (scraper.js): extractQuestionAndAnswers function is not available!");
-        // Fallback: process each question individually with an error message, or just skip UI update
-        await processSingleQuestion(mcqViewElement, index, apiKey, "Error: Core UI function (extract) missing.");
-        continue;
+      console.error("NetAcad Scraper (scraper.js): extractQuestionAndAnswers function is not available!");
+      // Fallback: process each question individually with an error message, or just skip UI update
+      await processSingleQuestion(mcqViewElement, index, apiKey, "Error: Core UI function (extract) missing.");
+      continue;
     }
     const extractionResult = extractQuestionAndAnswers(mcqViewElement, index);
     const answerTexts = processAnswerElements(extractionResult.answerElements, index);
@@ -115,13 +124,13 @@ async function scrapeData(currentAttempt = 1) {
   if (allQuestionsData.length > 0) {
     console.debug(`NetAcad Scraper (scraper.js): Extracted ${allQuestionsData.length} valid questions for batch API call.`);
     const questionsForBatchApi = allQuestionsData.map(q => ({ question: q.question, answers: q.answers }));
-    
+
     // Call processSingleQuestion for each item to set up initial UI (e.g., "Processing batch...")
     // BEFORE making the batch API call.
     for (const questionData of allQuestionsData) {
-        // Pass a specific message to indicate batch processing is starting
-        // processSingleQuestion will need to handle this initial state message.
-        await processSingleQuestion(questionData.mcqViewElement, questionData.originalIndex, apiKey, "BATCH_PROCESSING_STARTED");
+      // Pass a specific message to indicate batch processing is starting
+      // processSingleQuestion will need to handle this initial state message.
+      await processSingleQuestion(questionData.mcqViewElement, questionData.originalIndex, apiKey, "BATCH_PROCESSING_STARTED");
     }
 
     const batchApiResponse = await getAiAnswersForBatch(questionsForBatchApi, apiKey);
@@ -131,13 +140,35 @@ async function scrapeData(currentAttempt = 1) {
     if (batchApiResponse.error) {
       console.error("NetAcad Scraper (scraper.js): Error from batch API call:", batchApiResponse.error);
       batchError = batchApiResponse.error;
+
+      // Show API error prominently in the dev overlay
+      const errMsg = batchApiResponse.error || "Unknown API error";
+      let shortErr = errMsg;
+      if (errMsg.toLowerCase().includes('quota') || errMsg.includes('429')) shortErr = '⛔ API Quota Exceeded!';
+      else if (errMsg.includes('401') || errMsg.toLowerCase().includes('api key')) shortErr = '🔑 Invalid API Key!';
+      else if (errMsg.includes('503') || errMsg.toLowerCase().includes('overload')) shortErr = '😵 API Overloaded — Retrying...';
+      else if (errMsg.toLowerCase().includes('network') || errMsg.toLowerCase().includes('connect')) shortErr = '📡 No Internet / API Unreachable';
+      else shortErr = '⚠️ API Error: ' + errMsg.substring(0, 60);
+
+      if (typeof updateDevOverlay === 'function') updateDevOverlay('❌ API Error', shortErr);
+
+      // Unlock bot state so it doesn't freeze
+      if (window.netAcadBotState) {
+        window.netAcadBotState.isProcessingQuiz = false;
+        window.netAcadBotState.lastQuizProcessedAt = 0;
+      }
+      // Reset scrape URL after 15s so it retries the same question
+      setTimeout(() => {
+        if (typeof botLastScrapeUrl !== 'undefined') window.netAcadBotResetScrapeUrl && window.netAcadBotResetScrapeUrl();
+        console.log("NetAcad Scraper: 🔁 Retrying question after API error...");
+      }, 15000);
     } else if (batchApiResponse.answers && batchApiResponse.answers.length === allQuestionsData.length) {
       batchedAnswers = batchApiResponse.answers;
       console.debug("NetAcad Scraper (scraper.js): Successfully received batched answers.");
     } else {
       console.error("NetAcad Scraper (scraper.js): Mismatch in batched answers length or no answers received.");
       batchError = "Error: AI response for batch was incomplete or malformed.";
-      if(batchApiResponse.answers) batchedAnswers = batchApiResponse.answers; // Use partial if available
+      if (batchApiResponse.answers) batchedAnswers = batchApiResponse.answers; // Use partial if available
     }
 
     // Now, update each UI with its specific answer or the batch error

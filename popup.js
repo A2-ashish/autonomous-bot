@@ -1,54 +1,76 @@
 document.addEventListener("DOMContentLoaded", () => {
-  const apiKeyInput = document.getElementById("apiKey");
+  const apiKeysInput = document.getElementById("apiKeys");
+  const keyStatusDiv = document.getElementById("keyStatus");
   const saveKeyButton = document.getElementById("saveKey");
   const processPageButton = document.getElementById("processPage");
   const statusDiv = document.getElementById("status");
   const showAnswersToggle = document.getElementById("showAnswersToggle");
-  const processOnSwitchToggle = document.getElementById(
-    "processOnSwitchToggle",
-  );
+  const processOnSwitchToggle = document.getElementById("processOnSwitchToggle");
   const autonomousBotToggle = document.getElementById("autonomousBotToggle");
   const devModeToggle = document.getElementById("devModeToggle");
+  const quizOnlyModeToggle = document.getElementById("quizOnlyModeToggle");
+  const betaModeToggle = document.getElementById("betaModeToggle");
+  const modelSelect = document.getElementById("modelSelect");
 
   chrome.storage.sync.get(
-    ["geminiApiKey", "showAnswers", "processOnSwitch", "autonomousBot", "devMode"],
+    ["geminiApiKeys", "geminiApiKey", "currentKeyIndex", "showAnswers", "processOnSwitch", "autonomousBot", "devMode", "quizOnlyMode", "betaMode", "aiModel"],
     (result) => {
-      if (result.geminiApiKey) {
-        apiKeyInput.value = result.geminiApiKey;
-        statusDiv.textContent = "API Key loaded.";
-      } else {
-        statusDiv.textContent = "API Key not set.";
+      // Load keys — migrate legacy single key to array if needed
+      let keys = result.geminiApiKeys || [];
+      if (keys.length === 0 && result.geminiApiKey) {
+        keys = [result.geminiApiKey]; // backward compat
       }
+      apiKeysInput.value = keys.join("\n");
+
+      // Show active key status
+      const idx = result.currentKeyIndex || 0;
+      if (keys.length > 1) {
+        keyStatusDiv.textContent = `🔑 Active key: #${idx + 1} of ${keys.length}`;
+        keyStatusDiv.style.color = '#2e7d32';
+      } else if (keys.length === 1) {
+        keyStatusDiv.textContent = `🔑 1 key configured`;
+        keyStatusDiv.style.color = '#555';
+      } else {
+        keyStatusDiv.textContent = `⚠️ No API key set`;
+        keyStatusDiv.style.color = '#c62828';
+      }
+
       if (typeof result.showAnswers === "boolean") {
         showAnswersToggle.checked = result.showAnswers;
       } else {
         showAnswersToggle.checked = true;
       }
-
       if (typeof result.processOnSwitch === "boolean") {
         processOnSwitchToggle.checked = result.processOnSwitch;
       } else {
         processOnSwitchToggle.checked = true;
       }
-
       if (typeof result.autonomousBot === "boolean") {
         autonomousBotToggle.checked = result.autonomousBot;
       } else {
         autonomousBotToggle.checked = false;
       }
-
       if (typeof result.devMode === "boolean") {
         devModeToggle.checked = result.devMode;
       } else {
         devModeToggle.checked = false;
       }
-      setTimeout(() => {
-        if (
-          statusDiv.textContent === "API Key loaded." ||
-          statusDiv.textContent === "API Key not set."
-        )
-          statusDiv.textContent = "";
-      }, 2000);
+      if (typeof result.quizOnlyMode === "boolean") {
+        quizOnlyModeToggle.checked = result.quizOnlyMode;
+      } else {
+        quizOnlyModeToggle.checked = false;
+      }
+      if (typeof result.betaMode === "boolean") {
+        betaModeToggle.checked = result.betaMode;
+      } else {
+        betaModeToggle.checked = false;
+      }
+      
+      if (result.aiModel) {
+        modelSelect.value = result.aiModel;
+      } else {
+        modelSelect.value = "gemini-3.1-flash"; // Default
+      }
     },
   );
 
@@ -68,17 +90,36 @@ document.addEventListener("DOMContentLoaded", () => {
     chrome.storage.sync.set({ devMode: devModeToggle.checked });
   });
 
+  quizOnlyModeToggle.addEventListener("change", () => {
+    chrome.storage.sync.set({ quizOnlyMode: quizOnlyModeToggle.checked });
+  });
+
+  betaModeToggle.addEventListener("change", () => {
+    chrome.storage.sync.set({ betaMode: betaModeToggle.checked });
+  });
+  
+  modelSelect.addEventListener("change", () => {
+    chrome.storage.sync.set({ aiModel: modelSelect.value });
+  });
+
   saveKeyButton.addEventListener("click", () => {
-    const apiKey = apiKeyInput.value.trim();
-    if (apiKey) {
-      chrome.storage.sync.set({ geminiApiKey: apiKey }, () => {
-        statusDiv.textContent = "API Key saved!";
-        console.debug("API Key saved.");
-        setTimeout(() => (statusDiv.textContent = ""), 2000);
-      });
-    } else {
-      statusDiv.textContent = "Please enter an API Key.";
+    // Parse textarea — filter blank lines, trim whitespace
+    const rawKeys = apiKeysInput.value.split("\n").map(k => k.trim()).filter(k => k.length > 0);
+    if (rawKeys.length === 0) {
+      statusDiv.textContent = "Please enter at least one API key.";
+      return;
     }
+    chrome.storage.sync.set({ geminiApiKeys: rawKeys, currentKeyIndex: 0 }, () => {
+      statusDiv.textContent = `✅ ${rawKeys.length} key${rawKeys.length > 1 ? 's' : ''} saved!`;
+      if (rawKeys.length > 1) {
+        keyStatusDiv.textContent = `🔑 Active key: #1 of ${rawKeys.length} (reset to first)`;
+        keyStatusDiv.style.color = '#2e7d32';
+      } else {
+        keyStatusDiv.textContent = `🔑 1 key configured`;
+        keyStatusDiv.style.color = '#555';
+      }
+      setTimeout(() => (statusDiv.textContent = ""), 2500);
+    });
   });
 
   processPageButton.addEventListener("click", () => {

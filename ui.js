@@ -54,7 +54,10 @@ function extractQuestionAndAnswers(mcqViewElement, index) {
   let questionTextElement = null;
 
   try {
-    if (mcqViewElement && mcqViewElement.shadowRoot) {
+    // Determine if this is a standard mcq-view
+    const isMcqView = mcqViewElement && mcqViewElement.tagName && mcqViewElement.tagName.toLowerCase() === 'mcq-view';
+
+    if (isMcqView && mcqViewElement.shadowRoot) {
       const baseView = mcqViewElement.shadowRoot.querySelector(
         'base-view[type="component"]'
       );
@@ -81,66 +84,122 @@ function extractQuestionAndAnswers(mcqViewElement, index) {
             if (text.length > 20) {
               questionText = text;
               questionTextElement = el;
-              console.debug(
-                `NetAcad UI: Used generic text search in base-view for question ${
-                  index + 1
-                }: ${questionText}. Element: <${el.tagName}>`
-              );
               break;
             }
           }
-          if (!questionTextElement) {
-            console.warn(
-              `NetAcad UI: Question text element not found via specific or generic selectors in base-view for mcq ${
-                index + 1
-              }.`
-            );
-          }
         }
+// Helper to extract text across nested Shadow DOMs
+function getDeepText(node) {
+  if (!node) return "";
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+  
+  let text = "";
+  if (node.shadowRoot) {
+    text += getDeepText(node.shadowRoot) + " ";
+  }
+  
+  for (const child of node.childNodes) {
+    text += getDeepText(child);
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      if (['DIV', 'P', 'BR', 'PRE', 'CODE'].includes(child.tagName.toUpperCase())) {
+         text += "\n";
+      }
+    }
+  }
+  // Cleanup multiple spaces and newlines
+  return text.replace(/ +/g, ' ').replace(/\n\s*\n/g, '\n').trim();
+}
+
+// ... existing code context ...
       } else {
         let directQuestionEl = mcqViewElement.shadowRoot.querySelector(
-          "div.component__body-inner.mcq__body-inner"
+          "div.component__body-inner.mcq__body-inner, .mcq__prompt, .prompt"
         );
-        if (!directQuestionEl) {
-          directQuestionEl =
-            mcqViewElement.shadowRoot.querySelector(".mcq__prompt");
-        }
-        if (!directQuestionEl) {
-          directQuestionEl = mcqViewElement.shadowRoot.querySelector(".prompt");
-        }
 
         if (directQuestionEl) {
           questionTextElement = directQuestionEl;
-          questionText = directQuestionEl.innerText.trim();
+          questionText = getDeepText(directQuestionEl);
         } else {
           const potentialElements = Array.from(
             mcqViewElement.shadowRoot.querySelectorAll("div, p, span")
           );
+          let combinedText = [];
           for (const el of potentialElements) {
-            const text = el.innerText.trim();
-            if (text.length > 20) {
-              questionText = text;
-              questionTextElement = el;
-              console.debug(
-                `NetAcad UI: Used generic text search directly in mcq-view shadowRoot for question ${
-                  index + 1
-                }: ${questionText}. Element: <${el.tagName}>`
-              );
-              break;
+            const text = getDeepText(el);
+            if (text.length > 2) {
+              combinedText.push(text);
+              if (!questionTextElement) questionTextElement = el;
             }
           }
-          if (!questionTextElement) {
-            console.warn(
-              `NetAcad UI: Question text element not found in mcq ${
-                index + 1
-              } (no base-view or text not in mcq-view shadowRoot directly).`
-            );
+          if (combinedText.length > 0) {
+            questionText = combinedText.join('\n');
           }
         }
       }
       answerElements = mcqViewElement.shadowRoot.querySelectorAll(
         ".mcq__item-label.js-item-label"
       );
+    } else if (!isMcqView && window.getDeepElements) {
+      // GENERIC FALLBACK FOR MODULE TESTS (No mcq-view)
+      console.debug("NetAcad UI: Using broad generic extraction fallback for Question", index + 1);
+      
+      const inputs = window.getDeepElements('input, [role="radio"], [role="checkbox"]').filter(i => {
+           if (i.tagName.toLowerCase() === 'input') return i.type === 'radio' || i.type === 'checkbox';
+           return true; 
+      });
+      
+      if (inputs.length > 0) {
+        // Collect answer elements from labels or parents
+        inputs.forEach(input => {
+          let label = input.closest('label');
+          if (!label && input.parentElement) {
+            label = input.parentElement;
+          }
+          if (label && !answerElements.includes(label)) {
+             answerElements.push(label);
+          }
+        });
+        
+        // Find the question text: look upwards from the first input
+        let questionContainer = inputs[0].closest('.question-container, .mcq, .question, fieldset, form');
+        if (!questionContainer && inputs[0].parentElement) {
+            questionContainer = inputs[0].parentElement.parentElement;
+        }
+        
+        if (questionContainer) {
+          // get all text bearing elements that are direct children or block elements
+          const potentialTexts = Array.from(questionContainer.querySelectorAll("h1, h2, h3, h4, p, code, pre, .prompt, .question-text"))
+            .filter(el => {
+              return !answerElements.some(ans => ans.contains(el));
+            });
+            
+          let combinedText = [];
+          for (const el of potentialTexts) {
+            const text = el.innerText.trim();
+            if (text.length > 2 && !text.toLowerCase().includes('question') && !text.toLowerCase().match(/^(1[0-9]|20|[1-9]) of \d+/)) {
+              combinedText.push(text);
+              if (!questionTextElement) questionTextElement = el;
+            }
+          }
+          
+          if (combinedText.length > 0) {
+            questionText = combinedText.join('\n');
+          } else {
+            // If no specific paragraphs found, just grab the wrapper text and filter out the answer text
+            let wrapperText = questionContainer.innerText.trim();
+            answerElements.forEach(ans => {
+                wrapperText = wrapperText.replace(ans.innerText.trim(), '');
+            });
+            questionText = wrapperText.trim();
+            questionTextElement = questionContainer;
+          }
+          
+          if (!questionText || questionText === "Question text not found") {
+             questionText = "Please answer based on the choices above. Question could not be parsed but answers are visible.";
+             questionTextElement = questionContainer;
+          }
+        }
+      }
     } else {
       console.warn(
         `NetAcad UI: MCQ View element or its shadowRoot is missing for question ${
@@ -558,9 +617,24 @@ async function handleRefreshAction(questionText, answerTexts, apiKey, aiAnswerDi
     if (friendlyMsg) {
       aiAnswerDisplay.textContent = friendlyMsg;
     } else {
-      aiAnswerDisplay.textContent = rawAiResponse; // Display the error message directly
+      aiAnswerDisplay.textContent = rawAiResponse;
     }
     console.error(`NetAcad UI: Error displayed for Q${index + 1} (single refresh): ${rawAiResponse}`);
+
+    // Show in dev overlay
+    const errMsg = rawAiResponse || "Unknown error";
+    let shortErr;
+    if (errMsg.toLowerCase().includes('quota') || errMsg.includes('429')) shortErr = '⛔ API Quota Exceeded!';
+    else if (errMsg.includes('401') || errMsg.toLowerCase().includes('api key')) shortErr = '🔑 Invalid API Key!';
+    else if (errMsg.includes('503') || errMsg.toLowerCase().includes('overload')) shortErr = '😵 API Overloaded — Retrying...';
+    else if (errMsg.toLowerCase().includes('network') || errMsg.toLowerCase().includes('connect')) shortErr = '📡 No Internet / API Unreachable';
+    else shortErr = '⚠️ ' + errMsg.substring(0, 70);
+    if (typeof updateDevOverlay === 'function') updateDevOverlay('❌ API Error', shortErr);
+
+    // Unlock bot state & auto-retry in 15s
+    if (window.netAcadBotState) { window.netAcadBotState.isProcessingQuiz = false; window.netAcadBotState.lastQuizProcessedAt = 0; }
+    setTimeout(() => { window.netAcadBotResetScrapeUrl && window.netAcadBotResetScrapeUrl(); }, 15000);
+
   } else {
     aiAnswerDisplay.textContent =
       "AI Suggestion: No answer received or answer was empty (single refresh).";
@@ -690,10 +764,20 @@ function autoSelectMatchingAnswers(answerElements, individualAnswers) {
       console.debug(`NetAcad UI: Bot Auto-Selecting matching choice: "${text}"`);
       // Find the input element to specifically target it
       const parentContainer = answerEl.closest('.mcq__item') || answerEl.parentNode;
-      const inputChild = parentContainer ? parentContainer.querySelector('input[type="radio"], input[type="checkbox"]') : null;
+      let inputChild = parentContainer ? parentContainer.querySelector('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]') : null;
+      
+      if (!inputChild) {
+        inputChild = answerEl.querySelector('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]');
+      }
+      
+      // If the answerEl itself is the input
+      if (!inputChild && (answerEl.tagName === 'INPUT' || answerEl.getAttribute('role') === 'radio' || answerEl.getAttribute('role') === 'checkbox')) {
+         inputChild = answerEl;
+      }
       
       if (inputChild) {
-        if (!inputChild.checked) {
+        const isChecked = inputChild.tagName.toLowerCase() === 'input' ? inputChild.checked : inputChild.getAttribute('aria-checked') === 'true';
+        if (!isChecked) {
           inputChild.click();
           checkedCount++;
         }

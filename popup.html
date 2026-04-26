@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>NetAcad Scraper Control</title>
   <style>
     body {
@@ -50,9 +51,11 @@
 <body>
   <h3>NetAcad AI Assistant</h3>
   
-  <label for="apiKey">Gemini API Key:</label>
-  <input type="password" id="apiKey" placeholder="Enter your Gemini API Key">
-  
+  <label for="apiKeys">Gemini API Keys <small style="color:#888;">(one per line — rotates on quota)</small>:</label>
+  <textarea id="apiKeys" rows="4" placeholder="Paste API key 1 here&#10;Paste API key 2 here&#10;..." style="width:calc(100% - 18px);padding:7px;margin-top:5px;border:1px solid #ccc;border-radius:4px;font-size:12px;resize:vertical;font-family:monospace;"></textarea>
+
+  <div id="keyStatus" style="margin:5px 0 0 0;font-size:0.82em;color:#555;min-height:16px;"></div>
+
   <div style="margin: 10px 0 0 0; display: flex; align-items: center;">
     <input type="checkbox" id="showAnswersToggle" checked style="margin-right: 6px;">
     <label for="showAnswersToggle" style="cursor: pointer;">Show AI Answers</label>
@@ -65,12 +68,33 @@
   
   <div style="margin: 10px 0 0 0; display: flex; align-items: center;">
     <input type="checkbox" id="autonomousBotToggle" style="margin-right: 6px;">
-    <label for="autonomousBotToggle" style="cursor: pointer; font-weight: bold; color: #d9534f;">Enable Full Autonomous Bot</label>
+    <label for="autonomousBotToggle" style="cursor: pointer; color: #43a047; font-weight: bold;">🤖 Full Autonomous Bot</label>
   </div>
-
+  
+  <div style="margin: 10px 0 0 0; display: flex; align-items: center;">
+    <input type="checkbox" id="quizOnlyModeToggle" style="margin-right: 6px;">
+    <label for="quizOnlyModeToggle" style="cursor: pointer; color: #f57c00; font-weight: bold;">🎯 Quiz Only Mode</label>
+  </div>
+  
+  <!-- Add model selection dropdown -->
+  <div style="margin: 15px 0 5px 0;">
+    <label for="modelSelect" style="display: block; font-weight: bold; margin-bottom: 5px;">AI Model (Free Tier Only):</label>
+    <select id="modelSelect" style="width: 100%; padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px;">
+      <option value="gemini-3.1-flash">Gemini 3.1 Flash (Recommended)</option>
+      <option value="gemini-3.1-pro">Gemini 3.1 Pro (Heavy Logic)</option>
+      <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+    </select>
+  </div>
+  
   <div style="margin: 10px 0 0 0; display: flex; align-items: center;">
     <input type="checkbox" id="devModeToggle" style="margin-right: 6px;">
-    <label for="devModeToggle" style="cursor: pointer; color: #777;">🛠️ Developer Overlay (shows bot state)</label>
+    <label for="devModeToggle" style="cursor: pointer; color: #888;">Developer Status Overlay</label>
+  </div>
+  
+  <div style="margin: 10px 0 0 0; display: flex; align-items: center;">
+    <input type="checkbox" id="betaModeToggle" style="margin-right: 6px;">
+    <label for="betaModeToggle" style="cursor: pointer; color: #e91e63; font-weight: bold;">⚡ Beta Mode (Instant Scroll Skip)</label>
   </div>
   
   <button id="saveKey">Save API Key</button>

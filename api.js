@@ -1,10 +1,63 @@
-const GEMINI_MODEL = "gemini-2.5-flash";
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// ─────────────────────────────────────────────
+// KEY & MODEL ROTATION HELPERS
+// ─────────────────────────────────────────────
 
-async function getAiAnswer(question, answers, apiKey) {
+async function getActiveModelUrl() {
+  return new Promise(resolve => {
+    chrome.storage.sync.get(["aiModel"], (result) => {
+      const model = result.aiModel || "gemini-3.1-flash";
+      resolve(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`);
+    });
+  });
+}
+
+// Returns the currently active API key (string) or null if none configured
+async function getActiveApiKey() {
+  return new Promise(resolve => {
+    chrome.storage.sync.get(["geminiApiKeys", "currentKeyIndex", "geminiApiKey"], (result) => {
+      const keys = result.geminiApiKeys || (result.geminiApiKey ? [result.geminiApiKey] : []);
+      const idx = result.currentKeyIndex || 0;
+      if (keys.length === 0) return resolve(null);
+      resolve({ key: keys[idx] || keys[0], index: idx, total: keys.length });
+    });
+  });
+}
+
+// Rotates to the next key. Returns the new key info, or null if all exhausted.
+async function rotateToNextKey() {
+  return new Promise(resolve => {
+    chrome.storage.sync.get(["geminiApiKeys", "currentKeyIndex", "geminiApiKey"], (result) => {
+      const keys = result.geminiApiKeys || (result.geminiApiKey ? [result.geminiApiKey] : []);
+      if (keys.length <= 1) return resolve(null); // Only one key, can't rotate
+
+      const currentIdx = result.currentKeyIndex || 0;
+      const nextIdx = (currentIdx + 1) % keys.length;
+
+      chrome.storage.sync.set({ currentKeyIndex: nextIdx }, () => {
+        console.log(`NetAcad API: 🔄 Rotated to API key #${nextIdx + 1} of ${keys.length}`);
+        if (typeof updateDevOverlay === 'function') {
+          updateDevOverlay('🔄 Key Rotated', `Switched to key #${nextIdx + 1} of ${keys.length}`);
+        }
+        resolve({ key: keys[nextIdx], index: nextIdx, total: keys.length });
+      });
+    });
+  });
+}
+
+// ─────────────────────────────────────────────
+// SINGLE QUESTION — with auto-rotation on 429
+// ─────────────────────────────────────────────
+
+async function getAiAnswer(question, answers, apiKey = null, attemptCount = 0) {
+  // If no key passed, read from storage (supports rotation)
+  let keyInfo = null;
   if (!apiKey) {
-    console.error("Error: Gemini API Key not provided to getAiAnswer.");
-    return "Error: Gemini API Key not available. Please set it in the extension popup.";
+    keyInfo = await getActiveApiKey();
+    if (!keyInfo) {
+      console.error("Error: No Gemini API Keys configured.");
+      return "Error: Gemini API Key not available. Please set it in the extension popup.";
+    }
+    apiKey = keyInfo.key;
   }
 
   let prompt = `Given the following multiple-choice question and its possible answers, please choose the best answer(s).
@@ -22,7 +75,8 @@ Possible Answers:
   });
 
   try {
-    const response = await fetch(API_URL, {
+    const apiUrl = await getActiveModelUrl();
+    const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -33,10 +87,35 @@ Possible Answers:
       }),
     });
 
+    // Auto-rotate on quota/rate limit errors
+    if (response.status === 429 || response.status === 403) {
+      let apiReason = "";
+      try {
+        const errorData = await response.clone().json();
+        apiReason = errorData.error && errorData.error.message ? errorData.error.message : JSON.stringify(errorData);
+      } catch (e) {
+        apiReason = await response.clone().text();
+      }
+      console.warn(`NetAcad API: ⚠️ Key quota hit (${response.status}). Reason: ${apiReason}. Rotating key...`);
+      
+      const freshKeyInfo = await getActiveApiKey();
+      const totalKeys = freshKeyInfo ? freshKeyInfo.total : 1;
+      
+      if (attemptCount < totalKeys - 1) {
+        const newKeyInfo = await rotateToNextKey();
+        if (newKeyInfo) {
+          return getAiAnswer(question, answers, null, attemptCount + 1); // Pass null for key so it fetches the new rotated key
+        }
+      }
+      
+      const errorContext = response.status === 403 ? "Access Forbidden / Key Invalid" : "Rate Limit / Quota Exceeded";
+      return `Error: ${response.status} All API keys exhausted. ${errorContext} on all ${totalKeys} key(s). Last API message: ${apiReason}`;
+    }
+
     if (!response.ok) {
       const errorData = await response.json();
       console.error("Gemini API Error:", errorData);
-      return `Error calling Gemini API: ${response.status} ${response.statusText}. Check console. Key might be invalid or quota exceeded.`;
+      return `Error calling Gemini API: ${response.status} ${response.statusText}.`;
     }
 
     const data = await response.json();
@@ -58,16 +137,21 @@ Possible Answers:
   }
 }
 
-async function getAiAnswersForBatch(questionsDataArray, apiKey) {
+// ─────────────────────────────────────────────
+// BATCH QUESTIONS — with auto-rotation on 429
+// ─────────────────────────────────────────────
+
+async function getAiAnswersForBatch(questionsDataArray, apiKey = null, attemptCount = 0) {
+  // If no key passed, read from storage
+  let keyInfo = null;
   if (!apiKey) {
-    console.error(
-      "Error: Gemini API Key not provided to getAiAnswersForBatch.",
-    );
-    return {
-      error:
-        "Error: Gemini API Key not available. Please set it in the extension popup.",
-    };
+    keyInfo = await getActiveApiKey();
+    if (!keyInfo) {
+      return { error: "Error: Gemini API Key not available. Please set it in the extension popup." };
+    }
+    apiKey = keyInfo.key;
   }
+
   if (!questionsDataArray || questionsDataArray.length === 0) {
     console.debug("getAiAnswersForBatch: No questions provided.");
     return { answers: [] };
@@ -95,7 +179,8 @@ async function getAiAnswersForBatch(questionsDataArray, apiKey) {
   prompt += "\n```";
 
   try {
-    const response = await fetch(API_URL, {
+    const apiUrl = await getActiveModelUrl();
+    const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -109,13 +194,38 @@ async function getAiAnswersForBatch(questionsDataArray, apiKey) {
       }),
     });
 
+    // Auto-rotate on quota/rate limit errors
+    if (response.status === 429 || response.status === 403) {
+      let apiReason = "";
+      try {
+        const errorData = await response.clone().json();
+        apiReason = errorData.error && errorData.error.message ? errorData.error.message : JSON.stringify(errorData);
+      } catch (e) {
+        apiReason = await response.clone().text();
+      }
+      console.warn(`NetAcad API: ⚠️ Batch key quota hit (${response.status}). Reason: ${apiReason}. Rotating key...`);
+      
+      const freshKeyInfo = await getActiveApiKey();
+      const totalKeys = freshKeyInfo ? freshKeyInfo.total : 1;
+      
+      if (attemptCount < totalKeys - 1) {
+        const newKeyInfo = await rotateToNextKey();
+        if (newKeyInfo) {
+          // Add a small delay between rotations if it's 429 to avoid hammering the APIs simultaneously
+          await new Promise(r => setTimeout(r, 1000));
+          return getAiAnswersForBatch(questionsDataArray, null, attemptCount + 1); // Pass null to fetch rotated key
+        }
+      }
+      
+      const errorContext = response.status === 403 ? "Access Forbidden / Key Invalid" : "Rate Limit / Quota Exceeded";
+      return { error: `Error: ${response.status} All API keys exhausted. ${errorContext} on all ${totalKeys} key(s). Last API message: ${apiReason}` };
+    }
+
     if (!response.ok) {
       const errorData = await response.json();
-      console.error("Gemini API Batch Error (response.ok false):", errorData);
+      console.error("Gemini API Batch Error:", errorData);
       return {
-        error: `Error calling Gemini API: ${response.status} ${
-          response.statusText
-        }. Details: ${JSON.stringify(errorData)}`,
+        error: `Error calling Gemini API: ${response.status} ${response.statusText}. Details: ${JSON.stringify(errorData)}`,
       };
     }
 
@@ -139,51 +249,23 @@ async function getAiAnswersForBatch(questionsDataArray, apiKey) {
           if (parsedAnswers.length === questionsDataArray.length) {
             return { answers: parsedAnswers };
           } else {
-            console.error(
-              "Gemini API Batch Error: Number of answers received does not match number of questions sent.",
-              parsedAnswers,
-            );
-            return {
-              error: "Error: Mismatch in number of answers from AI.",
-              answers: parsedAnswers,
-            };
+            console.error("Gemini API Batch Error: Answer count mismatch.", parsedAnswers);
+            return { error: "Error: Mismatch in number of answers from AI.", answers: parsedAnswers };
           }
         } else {
-          console.error(
-            "Gemini API Batch Error: Response is not a JSON array of strings.",
-            parsedAnswers,
-          );
-          return {
-            error:
-              "Error: AI response was not a valid JSON array of answer strings.",
-          };
+          console.error("Gemini API Batch Error: Response is not a JSON array of strings.", parsedAnswers);
+          return { error: "Error: AI response was not a valid JSON array of answer strings." };
         }
       } catch (e) {
-        console.error(
-          "Gemini API Batch Error: Failed to parse AI response as JSON.",
-          rawResponseText,
-          e,
-        );
-        return {
-          error:
-            "Error: Could not parse AI response for batch. Raw: " +
-            rawResponseText,
-        };
+        console.error("Gemini API Batch Error: Failed to parse AI response as JSON.", rawResponseText, e);
+        return { error: "Error: Could not parse AI response for batch. Raw: " + rawResponseText };
       }
     } else {
-      console.error(
-        "Unexpected response structure from Gemini API for batch:",
-        data,
-      );
-      return {
-        error:
-          "Error: Could not extract answers from Gemini batch response structure.",
-      };
+      console.error("Unexpected response structure from Gemini API for batch:", data);
+      return { error: "Error: Could not extract answers from Gemini batch response structure." };
     }
   } catch (error) {
     console.error("Error fetching from Gemini API for batch:", error);
-    return {
-      error: "Error connecting to Gemini API for batch. Check console.",
-    };
+    return { error: "Error connecting to Gemini API for batch. Check console." };
   }
 }
