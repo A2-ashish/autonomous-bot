@@ -326,6 +326,64 @@ function getDeepElements(selector = '*') {
   return elements;
 }
 
+// Helper: Find the ">" (next page) navigation arrow button
+function findNextPageArrow() {
+  const allClickables = [
+    ...getDeepElements('button'),
+    ...getDeepElements('a'),
+  ];
+  // Also include elements with role="button"
+  getDeepElements('*').forEach(el => {
+    if (el.getAttribute && el.getAttribute('role') === 'button') {
+      allClickables.push(el);
+    }
+  });
+
+  for (const el of allClickables) {
+    const text = (el.innerText || el.textContent || '').trim();
+    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+    const title = (el.getAttribute('title') || '').toLowerCase();
+    const cls = (el.className || '').toLowerCase();
+    const isDisabled = el.disabled || el.classList.contains('disabled') || el.getAttribute('aria-disabled') === 'true';
+
+    if (isDisabled) continue;
+
+    // Match ">" arrow buttons: text is exactly ">" or "›" or "Next"
+    const isNextArrow =
+      text === '>' || text === '›' || text === '→' || text === '»' ||
+      ariaLabel.includes('next') || ariaLabel.includes('forward') ||
+      title.includes('next') || title.includes('forward') ||
+      cls.includes('next-arrow') || cls.includes('arrow-right') || cls.includes('forward') ||
+      cls.includes('nav-next');
+
+    if (isNextArrow) {
+      // Verify it's visible (has dimensions)
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        console.log("NetAcad Bot: Found '>' arrow:", text || ariaLabel || cls);
+        return el;
+      }
+    }
+  }
+
+  // Fallback: look for elements positioned on the right side that look like navigation arrows
+  const rightSideElements = allClickables.filter(el => {
+    const rect = el.getBoundingClientRect();
+    const text = (el.innerText || el.textContent || '').trim();
+    // Right side of viewport, small element (arrow-like), with ">" or similar text
+    return rect.width > 0 && rect.height > 0 &&
+           rect.left > window.innerWidth * 0.85 &&
+           (text === '>' || text === '›' || text === '→' || text.length <= 2);
+  });
+
+  if (rightSideElements.length > 0) {
+    console.log("NetAcad Bot: Found right-side '>' arrow via position fallback.");
+    return rightSideElements[0];
+  }
+
+  return null;
+}
+
 // Track whether we already triggered scrape for the current page
 let botLastScrapeUrl = '';
 let lastScrollY = -1;
@@ -416,13 +474,26 @@ function runQuizOnlyLoop(isBetaMode = false) {
     return;
   }
 
-  // Detect final review/score page — stop loop
+  // Detect final review/score page — click ">" to proceed to next page
   const pageText = document.body.innerText.toLowerCase();
   const isFinalPage = pageText.includes('your score') || pageText.includes('quiz complete') || 
                       pageText.includes('results') || pageText.includes('passed') ||
                       pageText.includes('failed') || pageText.includes('grade');
   if (isFinalPage && !hasMcq) {
-    updateDevOverlay('🏁 Quiz Done', 'Final results page detected!');
+    // Try to find the ">" navigation arrow to move to the next page
+    const nextArrow = findNextPageArrow();
+    if (nextArrow) {
+      updateDevOverlay('🏁 Quiz Done', 'Clicking ">" to proceed...');
+      console.log("NetAcad Bot [Quiz Only]: 🏁 Results page detected. Clicking \">\" to proceed.");
+      nextArrow.click();
+      botLastScrapeUrl = '';
+      if (window.netAcadBotState) {
+        window.netAcadBotState.submitFired = false;
+        window.netAcadBotState.lastQuizProcessedAt = 0;
+      }
+    } else {
+      updateDevOverlay('🏁 Quiz Done', 'Final results page — no ">" found.');
+    }
     return;
   }
 
@@ -742,33 +813,88 @@ function runAutonomousBotLoop() {
     let videoSkipped = false;
 
     // 1. Video.js Players (Blob & MSE - used heavily by NetAcad)
+    //    Strategy: Click near the end of the progress bar to seek, since
+    //    programmatic currentTime doesn't work reliably with blob/MSE sources.
     const vjsPlayers = getDeepElements('.vjs-tech');
     vjsPlayers.forEach(video => {
-      if (!video.dataset.botSkipped) {
-        console.log("NetAcad Bot: ⏩ Fast forwarding Video.js player.");
-        updateDevOverlay('⏩ Video', 'Skipping Video.js player');
-        
-        const script = document.createElement('script');
-        script.textContent = `
-          try {
-            if (window.videojs && window.videojs.players) {
-              Object.values(window.videojs.players).forEach(p => {
-                if (p && typeof p.duration === 'function' && typeof p.currentTime === 'function') {
-                   var d = Number(p.duration());
-                   if (d > 0 && Math.abs(Number(p.currentTime()) - d) > 1) {
-                     p.currentTime(Math.max(0, d - 0.5));
-                     if (typeof p.playbackRate === 'function') p.playbackRate(16);
-                     p.play();
-                     setTimeout(function() { try { p.trigger('timeupdate'); p.trigger('ended'); } catch(e){} }, 500);
-                   }
-                }
-              });
-            }
-          } catch(e) {}
-        `;
-        (document.head || document.documentElement).appendChild(script);
-        script.remove();
+      if (video.dataset.botSkipped) return;
 
+      // Find the Video.js container (parent with class 'video-js')
+      let vjsContainer = video.closest('.video-js');
+      if (!vjsContainer) {
+        // Try traversing up through shadow DOM boundaries
+        let parent = video.parentElement;
+        while (parent) {
+          if (parent.classList && parent.classList.contains('video-js')) {
+            vjsContainer = parent;
+            break;
+          }
+          parent = parent.parentElement || (parent.host ? parent.host : null);
+        }
+      }
+      // Also search via deep elements if container not found by traversal
+      if (!vjsContainer) {
+        vjsContainer = getDeepElements('.video-js')[0];
+      }
+
+      if (!vjsContainer) {
+        console.warn("NetAcad Bot: ⏩ Video.js player found but no .video-js container. Skipping.");
+        return;
+      }
+
+      // Step 1: Click Play button first if the video hasn't started
+      //         (progress bar may not be interactive until video plays)
+      const playBtn = vjsContainer.querySelector('.vjs-big-play-button') || 
+                      vjsContainer.querySelector('.vjs-play-control');
+      const isPlaying = vjsContainer.classList.contains('vjs-playing');
+      const isPaused = vjsContainer.classList.contains('vjs-paused');
+      
+      if (!isPlaying && playBtn) {
+        console.log("NetAcad Bot: ▶️ Clicking Play to start video before seeking.");
+        updateDevOverlay('⏩ Video', 'Starting video...');
+        playBtn.click();
+        videoSkipped = true; // Prevent bot from scrolling while video starts
+        // Wait for next cycle to let the video initialize, then seek progress bar
+        return;
+      }
+
+      // Step 2: Find the progress bar slider and click near the end
+      const progressHolder = vjsContainer.querySelector('.vjs-progress-holder') ||
+                             vjsContainer.querySelector('.vjs-slider');
+      
+      if (progressHolder) {
+        const rect = progressHolder.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          // Click at 99% of the progress bar width — let the last 1% play to reach 100%
+          const clickX = rect.left + (rect.width * 0.99);
+          const clickY = rect.top + (rect.height / 2);
+          
+          console.log(`NetAcad Bot: ⏩ Clicking progress bar at 99% (x=${Math.round(clickX)}, y=${Math.round(clickY)})`);
+          updateDevOverlay('⏩ Video', 'Seeking to 99%... waiting for 100%');
+          
+          // Simulate mousedown + mouseup click on the progress bar
+          const mouseOpts = { bubbles: true, cancelable: true, clientX: clickX, clientY: clickY };
+          progressHolder.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          progressHolder.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          progressHolder.dispatchEvent(new MouseEvent('click', mouseOpts));
+          
+          videoSkipped = true;
+          console.log("NetAcad Bot: ⏩ Video.js progress bar clicked at 99%. Waiting 2s for 100%...");
+          
+          // Wait 2 seconds for the video to finish the last 1% and reach 100%
+          setTimeout(() => {
+            video.dataset.botSkipped = "true";
+            console.log("NetAcad Bot: ✅ Video should be at 100% now. Marked as skipped.");
+          }, 2000);
+        }
+      } else {
+        console.warn("NetAcad Bot: ⏩ Video.js container found but no progress bar. Trying fallback.");
+        // Fallback: try to find and click the duration time display
+        const durationDisplay = vjsContainer.querySelector('.vjs-duration-display') ||
+                                vjsContainer.querySelector('.vjs-duration');
+        if (durationDisplay) {
+          durationDisplay.click();
+        }
         video.dataset.botSkipped = "true";
         videoSkipped = true;
       }
@@ -909,7 +1035,7 @@ function runAutonomousBotLoop() {
     }
 
     // ============================================================
-    // DONE: Reached bottom of page — just wait
+    // DONE: Reached bottom of page — click ">" to go to next page
     // ============================================================
     const currentPos = scrollTarget ? scrollTarget.scrollTop : window.scrollY;
     if (currentPos === lastScrollY) {
@@ -920,7 +1046,23 @@ function runAutonomousBotLoop() {
     lastScrollY = currentPos;
 
     if (scrollStuckCount > 2) {
-      updateDevOverlay('✅ Done', 'Scrolled to bottom. Waiting...');
+      // Try to find the ">" navigation arrow to advance to the next page
+      const nextArrow = findNextPageArrow();
+      if (nextArrow) {
+        updateDevOverlay('➡️ Navigating', 'Clicking ">" for next page...');
+        console.log("NetAcad Bot: ➡️ Scrolled to bottom — clicking \">\" to advance.");
+        nextArrow.click();
+        lastNavigatedAt = Date.now();
+        botLastScrapeUrl = '';
+        scrollStuckCount = 0;
+        lastScrollY = -1;
+        if (window.netAcadBotState) {
+          window.netAcadBotState.submitFired = false;
+          window.netAcadBotState.lastQuizProcessedAt = 0;
+        }
+      } else {
+        updateDevOverlay('✅ Done', 'Scrolled to bottom. No ">" found.');
+      }
     }
   });
 }
