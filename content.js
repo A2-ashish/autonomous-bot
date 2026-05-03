@@ -327,6 +327,10 @@ function getDeepElements(selector = '*') {
 }
 
 // Helper: Find the ">" (next page) navigation arrow button
+// NetAcad uses CSS module hashed class names like:
+//   button.moduleNavBtn--sFwjV.next--3dfUb
+//   span.icon.icon-right-arrow.moduleNavIcon--GDR72
+//   aria-label="Go To 10.1. Configure Initial Router Settings"
 function findNextPageArrow() {
   const allClickables = [
     ...getDeepElements('button'),
@@ -343,18 +347,40 @@ function findNextPageArrow() {
     const text = (el.innerText || el.textContent || '').trim();
     const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
     const title = (el.getAttribute('title') || '').toLowerCase();
-    const cls = (el.className || '').toLowerCase();
+    const cls = (el.className || '');
+    const clsLower = cls.toLowerCase();
     const isDisabled = el.disabled || el.classList.contains('disabled') || el.getAttribute('aria-disabled') === 'true';
 
     if (isDisabled) continue;
 
-    // Match ">" arrow buttons: text is exactly ">" or "›" or "Next"
-    const isNextArrow =
+    // Check 1: NetAcad-specific — class contains "next--" (CSS module pattern like next--3dfUb)
+    const hasNextClass = /\bnext--\w+/i.test(cls);
+    
+    // Check 2: Has a child icon with right-arrow class
+    const hasRightArrowIcon = el.querySelector && (
+      el.querySelector('.icon-right-arrow') ||
+      el.querySelector('[class*="icon-right-arrow"]') ||
+      el.querySelector('[class*="right-arrow"]')
+    );
+    
+    // Check 3: aria-label starts with "go to" (NetAcad nav pattern)
+    const hasGoToLabel = ariaLabel.startsWith('go to') || title.startsWith('go to');
+    
+    // Check 4: Class contains moduleNavBtn (NetAcad module navigation)
+    const hasModuleNavClass = /\bmoduleNavBtn/i.test(cls);
+
+    // Check 5: Generic arrow text or keywords
+    const isGenericNext =
       text === '>' || text === '›' || text === '→' || text === '»' ||
       ariaLabel.includes('next') || ariaLabel.includes('forward') ||
       title.includes('next') || title.includes('forward') ||
-      cls.includes('next-arrow') || cls.includes('arrow-right') || cls.includes('forward') ||
-      cls.includes('nav-next');
+      clsLower.includes('next-arrow') || clsLower.includes('arrow-right') ||
+      clsLower.includes('nav-next');
+
+    // Match if it's a next-direction button (must have next class OR right arrow icon with nav context)
+    const isNextArrow = isGenericNext || hasNextClass || 
+                        (hasRightArrowIcon && (hasGoToLabel || hasModuleNavClass)) ||
+                        (hasModuleNavClass && hasNextClass);
 
     if (isNextArrow) {
       // Verify it's visible (has dimensions)
@@ -366,14 +392,15 @@ function findNextPageArrow() {
     }
   }
 
-  // Fallback: look for elements positioned on the right side that look like navigation arrows
+  // Fallback: look for elements positioned on the right side of viewport
   const rightSideElements = allClickables.filter(el => {
     const rect = el.getBoundingClientRect();
-    const text = (el.innerText || el.textContent || '').trim();
-    // Right side of viewport, small element (arrow-like), with ">" or similar text
+    const cls = (el.className || '');
+    // Right side of viewport, has arrow-related class or small text
     return rect.width > 0 && rect.height > 0 &&
            rect.left > window.innerWidth * 0.85 &&
-           (text === '>' || text === '›' || text === '→' || text.length <= 2);
+           (/arrow|next|forward|moduleNav/i.test(cls) || 
+            (el.innerText || '').trim().length <= 2);
   });
 
   if (rightSideElements.length > 0) {
@@ -959,6 +986,53 @@ function runAutonomousBotLoop() {
     });
 
     if (videoSkipped) return;
+
+    // ============================================================
+    // PRIORITY 4.5: Click "Show all" button if present (labs/syntax checkers)
+    // ============================================================
+    const showAllBtn = getDeepElements('button').find(btn => {
+      const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+      const id = (btn.id || '').toLowerCase();
+      const isDisabled = btn.disabled || btn.classList.contains('disabled') || btn.getAttribute('aria-disabled') === 'true';
+      return !isDisabled && (text === 'show all' || id === 'showall' || id === 'show-all');
+    });
+
+    if (showAllBtn) {
+      const rect = showAllBtn.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        console.log("NetAcad Bot: 📋 Clicking 'Show all' button.");
+        updateDevOverlay('📋 Revealing', 'Clicking Show all...');
+        showAllBtn.click();
+        return;
+      }
+    }
+
+    // ============================================================
+    // PRIORITY 4.6: Click through all tabs in tab groups
+    // ============================================================
+    const allTabs = getDeepElements('button, [role="tab"]').filter(el => {
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      const cls = (el.className || '').toLowerCase();
+      return role === 'tab' || cls.includes('tabs_nav-item-btn') || cls.includes('nav-item-btn');
+    });
+
+    if (allTabs.length > 1) {
+      // Find the first unvisited tab (not yet clicked by the bot)
+      const unvisitedTab = allTabs.find(tab => {
+        const isDisabled = tab.disabled || tab.getAttribute('aria-disabled') === 'true';
+        const alreadyClicked = tab.dataset.botTabClicked === 'true';
+        return !isDisabled && !alreadyClicked;
+      });
+
+      if (unvisitedTab) {
+        const tabName = (unvisitedTab.innerText || unvisitedTab.textContent || '').trim();
+        console.log(`NetAcad Bot: 📑 Clicking tab: "${tabName}"`);
+        updateDevOverlay('📑 Tabs', `Clicking tab: ${tabName}`);
+        unvisitedTab.click();
+        unvisitedTab.dataset.botTabClicked = 'true';
+        return;
+      }
+    }
 
     // ============================================================
     // PRIORITY 5: Scroll down through reading content
