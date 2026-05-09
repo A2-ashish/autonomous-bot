@@ -82,9 +82,32 @@ function updateDevOverlay(state, action, extra = {}) {
 
 
 let debounceTimeout;
+// Flag to suppress MutationObserver when the bot itself modifies the DOM
+window._netAcadBotSuppressObserver = false;
+
 function debouncedScrape() {
+  // Don't re-trigger scrape if we're already processing a quiz or the bot is modifying DOM
+  if (window._netAcadBotSuppressObserver) {
+    console.debug("NetAcad Scraper: Observer suppressed (bot's own DOM change). Ignoring.");
+    return;
+  }
+  if (window.netAcadBotState && window.netAcadBotState.isProcessingQuiz) {
+    console.debug("NetAcad Scraper: Already processing quiz. Ignoring mutation-triggered scrape.");
+    return;
+  }
+
   clearTimeout(debounceTimeout);
   debounceTimeout = setTimeout(() => {
+    // Re-check lock after debounce delay
+    if (window.netAcadBotState && window.netAcadBotState.isProcessingQuiz) {
+      console.debug("NetAcad Scraper: Quiz processing started during debounce. Skipping.");
+      return;
+    }
+    // Re-check suppression flag (it may have been set during debounce)
+    if (window._netAcadBotSuppressObserver) {
+      console.debug("NetAcad Scraper: Observer suppressed during debounce window. Skipping.");
+      return;
+    }
     chrome.storage.sync.get(["processOnSwitch"], (result) => {
       if (result.processOnSwitch === false) {
         console.debug(
@@ -104,7 +127,7 @@ function debouncedScrape() {
         );
       }
     });
-  }, 1200);
+  }, 3000);
 }
 
 function initMutationObserver() {
@@ -332,16 +355,80 @@ function getDeepElements(selector = '*') {
 //   span.icon.icon-right-arrow.moduleNavIcon--GDR72
 //   aria-label="Go To 10.1. Configure Initial Router Settings"
 function findNextPageArrow() {
+  // ==================================================================
+  // TARGETED SEARCH: Directly traverse app-root shadow DOM chain
+  // for the moduleNavBtn next button. This is the most reliable method
+  // because getDeepElements may miss elements in deeply nested shadows.
+  // ==================================================================
+  try {
+    const appRoot = document.querySelector('app-root');
+    if (appRoot) {
+      // BFS through shadow DOM chain starting from app-root
+      const shadowQueue = [appRoot];
+      while (shadowQueue.length > 0) {
+        const node = shadowQueue.shift();
+        if (!node) continue;
+
+        const searchRoot = node.shadowRoot || node;
+        // Look for buttons with next-- class (CSS module hash pattern)
+        const nextBtns = searchRoot.querySelectorAll('button[class*="next--"], button[class*="moduleNavBtn"]');
+        for (const btn of nextBtns) {
+          const cls = (btn.className || '');
+          const hasNextClass = /next--/i.test(cls);
+          const hasModuleNav = /moduleNavBtn/i.test(cls);
+          const isDisabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+          if (isDisabled) continue;
+          // Verify it's a "next" direction button (not "prev")
+          if (hasNextClass || (hasModuleNav && !(/prev--/i.test(cls)))) {
+            const rect = btn.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              console.log("NetAcad Bot: Found '>' arrow via targeted shadow DOM search:", btn.getAttribute('aria-label') || cls);
+              return btn;
+            }
+          }
+        }
+
+        // Also look for icon-right-arrow spans and walk up to their parent button
+        const arrowSpans = searchRoot.querySelectorAll('span[class*="icon-right-arrow"], span[class*="moduleNavIcon"]');
+        for (const span of arrowSpans) {
+          let parent = span.parentElement;
+          while (parent && parent !== document.body) {
+            if (parent.tagName && parent.tagName.toLowerCase() === 'button') {
+              const isDisabled = parent.disabled || parent.getAttribute('aria-disabled') === 'true';
+              if (!isDisabled) {
+                const rect = parent.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                  console.log("NetAcad Bot: Found '>' arrow via targeted span→button walk:", parent.getAttribute('aria-label') || parent.className);
+                  return parent;
+                }
+              }
+              break;
+            }
+            parent = parent.parentElement || (parent.host ? parent.host : null);
+          }
+        }
+
+        // Enqueue child elements that have shadow roots for deeper traversal
+        const children = searchRoot.querySelectorAll ? searchRoot.querySelectorAll('*') : [];
+        for (const child of children) {
+          if (child.shadowRoot) {
+            shadowQueue.push(child);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("NetAcad Bot: Targeted shadow DOM arrow search failed:", e);
+  }
+
+  // ==================================================================
+  // GENERIC SEARCH: Fall back to getDeepElements broad search
+  // ==================================================================
   const allClickables = [
     ...getDeepElements('button'),
     ...getDeepElements('a'),
+    ...getDeepElements('[role="button"]'),
   ];
-  // Also include elements with role="button"
-  getDeepElements('*').forEach(el => {
-    if (el.getAttribute && el.getAttribute('role') === 'button') {
-      allClickables.push(el);
-    }
-  });
 
   for (const el of allClickables) {
     const text = (el.innerText || el.textContent || '').trim();
@@ -392,7 +479,42 @@ function findNextPageArrow() {
     }
   }
 
-  // Fallback: look for elements positioned on the right side of viewport
+  // Fallback 1: Search for <span> elements with icon-right-arrow class (NetAcad uses
+  // <span class="icon icon-right-arrow moduleNavIcon--GDR72"> inside navigation buttons)
+  const arrowSpans = getDeepElements('span').filter(span => {
+    const cls = (span.className || '');
+    return /icon-right-arrow/i.test(cls) || /moduleNavIcon/i.test(cls);
+  });
+
+  for (const span of arrowSpans) {
+    // Walk up the DOM to find the nearest clickable parent (button, a, or [role="button"])
+    let parent = span.parentElement;
+    let clickTarget = null;
+    while (parent) {
+      const tag = (parent.tagName || '').toLowerCase();
+      const role = (parent.getAttribute('role') || '').toLowerCase();
+      if (tag === 'button' || tag === 'a' || role === 'button') {
+        clickTarget = parent;
+        break;
+      }
+      // If no semantic clickable parent found, the span's immediate parent is likely the click target
+      if (parent === document.body) break;
+      parent = parent.parentElement || (parent.host ? parent.host : null);
+    }
+    // If no clickable parent found, use the span itself (some UIs attach click handlers to spans)
+    if (!clickTarget) clickTarget = span;
+
+    const isDisabled = clickTarget.disabled || clickTarget.classList?.contains('disabled') || clickTarget.getAttribute?.('aria-disabled') === 'true';
+    if (isDisabled) continue;
+
+    const rect = clickTarget.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      console.log("NetAcad Bot: Found '>' arrow via <span> icon-right-arrow fallback:", clickTarget.tagName, clickTarget.className);
+      return clickTarget;
+    }
+  }
+
+  // Fallback 2: look for elements positioned on the right side of viewport
   const rightSideElements = allClickables.filter(el => {
     const rect = el.getBoundingClientRect();
     const cls = (el.className || '');
@@ -424,6 +546,10 @@ window.netAcadBotResetScrapeUrl = () => {
     window.netAcadBotState.submitFired = false;
     window.netAcadBotState.lastQuizProcessedAt = 0;
   }
+  // Clear answered question signatures so retries can actually re-process
+  if (window._netAcadAnsweredSignatures) {
+    window._netAcadAnsweredSignatures.clear();
+  }
   console.log("NetAcad Bot: 🔁 Scrape URL reset — will retry current question.");
 };
 
@@ -443,6 +569,56 @@ function runQuizOnlyLoop(isBetaMode = false) {
     return true;
   });
 
+  // Detect matching/ordering questions — SKIP these automatically
+  const matchingElements = getDeepElements('object-matching-dropdown-view');
+  const hasMatching = matchingElements.length > 0;
+
+  // AUTO-SKIP matching questions: they are unreliable and waste API credits
+  if (hasMatching && quizInputs.length === 0) {
+    console.log("NetAcad Bot [Quiz Only]: ⏭ Matching question detected — auto-skipping.");
+    updateDevOverlay('⏭ Skipping', 'Matching question — skipping...');
+    // "Skip Question" is a div.skip-inner, not a <button>
+    const allClickableEls = getDeepElements('[class*="skip"], button, div, a, [role="button"]');
+    const skipBtn = allClickableEls.find(el => {
+      const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+      const cls = (el.className || '').toString().toLowerCase();
+      const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+      return !isDisabled && (
+        cls.includes('skip-inner') ||
+        cls.includes('skip__inner') ||
+        t === 'skip question' ||
+        t === 'skip'
+      );
+    });
+    if (skipBtn) {
+      console.log("NetAcad Bot [Quiz Only]: ⏭ Clicking 'Skip Question' element.");
+      skipBtn.click();
+      botLastScrapeUrl = '';
+      if (window.netAcadBotState) {
+        window.netAcadBotState.submitFired = false;
+        window.netAcadBotState.lastQuizProcessedAt = 0;
+      }
+      if (window._netAcadAnsweredSignatures) window._netAcadAnsweredSignatures.clear();
+      return;
+    }
+    // No skip button found — try the ">" next arrow as fallback
+    const nextArrow = findNextPageArrow();
+    if (nextArrow) {
+      console.log("NetAcad Bot [Quiz Only]: ⏭ No skip button — clicking '>' to advance past matching question.");
+      nextArrow.click();
+      botLastScrapeUrl = '';
+      if (window.netAcadBotState) {
+        window.netAcadBotState.submitFired = false;
+        window.netAcadBotState.lastQuizProcessedAt = 0;
+      }
+      if (window._netAcadAnsweredSignatures) window._netAcadAnsweredSignatures.clear();
+      return;
+    }
+    // Nothing to click — just wait
+    updateDevOverlay('⏭ Skipping', 'Matching question — waiting for skip option...');
+    return;
+  }
+
   const allButtons = getDeepElements('button');
   // ANY submit button (enabled OR disabled) — used to detect we're on a quiz page
   const anySubmitBtn = allButtons.find(btn => {
@@ -456,7 +632,7 @@ function runQuizOnlyLoop(isBetaMode = false) {
     return (t === 'submit' || t.includes('submit')) && t !== 'reset' && !isDisabled;
   });
 
-  const hasMcq = quizInputs.length > 0 && anySubmitBtn; // quiz present
+  const hasMcq = (quizInputs.length > 0) && anySubmitBtn; // quiz present (matching excluded — auto-skipped above)
 
   // -------------------------------------------------------------
   // Handle the "Submit My Assessment" (Review) Page
@@ -518,6 +694,10 @@ function runQuizOnlyLoop(isBetaMode = false) {
         window.netAcadBotState.submitFired = false;
         window.netAcadBotState.lastQuizProcessedAt = 0;
       }
+      // Clear answered signatures for the new page
+      if (window._netAcadAnsweredSignatures) {
+        window._netAcadAnsweredSignatures.clear();
+      }
     } else {
       updateDevOverlay('🏁 Quiz Done', 'Final results page — no ">" found.');
     }
@@ -554,9 +734,15 @@ function runQuizOnlyLoop(isBetaMode = false) {
       if (i.tagName.toLowerCase() === 'input') return (i.type === 'radio' || i.type === 'checkbox') && i.checked;
       return i.getAttribute('aria-checked') === 'true';
     });
+    // For matching questions, check if any matching selects have been filled
+    const matchingSelects = getDeepElements('[class*="matching__select-container"]');
+    const hasMatchingAnswers = matchingSelects.length > 0 && matchingSelects.some(el => {
+      const text = (el.innerText || el.textContent || '').trim();
+      return text.length > 0 && text !== '--';
+    });
     const wasProcessed = window.netAcadBotState && window.netAcadBotState.lastQuizProcessedAt > 0;
 
-    if (checkedInputs.length > 0 && wasProcessed && enabledSubmitBtn) {
+    if ((checkedInputs.length > 0 || hasMatchingAnswers) && wasProcessed && enabledSubmitBtn) {
       updateDevOverlay('🎯 Quiz Mode', '📤 Submitting answer...');
       window.netAcadBotState.submitFired = true;
       setTimeout(() => {
@@ -568,6 +754,10 @@ function runQuizOnlyLoop(isBetaMode = false) {
           if (window.netAcadBotState) {
             window.netAcadBotState.submitFired = false;
             window.netAcadBotState.lastQuizProcessedAt = 0;
+          }
+          // Clear answered signatures when moving to next question
+          if (window._netAcadAnsweredSignatures) {
+            window._netAcadAnsweredSignatures.clear();
           }
           console.log("NetAcad Bot [Quiz Only]: 🔄 Ready for next question.");
         }, 2000);
@@ -653,12 +843,12 @@ function runAutonomousBotLoop() {
 
     // CHECK FOR LOADING STATE: If loading spinner is visible, wait
     try {
-      const loadingIndicators = getDeepElements('*').filter(el => {
-        const cls = (el.className || '').toLowerCase();
-        const tag = (el.tagName || '').toLowerCase();
-        return cls.includes('spinner') || cls.includes('loading') || cls.includes('loader') || 
-               tag.includes('loader') || tag.includes('spinner');
-      });
+      // Use targeted selectors instead of getDeepElements('*') to avoid full DOM traversal
+      const loadingIndicators = [
+        ...getDeepElements('[class*="spinner"]'),
+        ...getDeepElements('[class*="loading"]'),
+        ...getDeepElements('[class*="loader"]'),
+      ];
       const hasVisibleLoader = loadingIndicators.some(el => {
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -681,7 +871,35 @@ function runAutonomousBotLoop() {
         hasMcq = true;
       }
 
-      // Method 2: Check for quiz-like inputs (radio/checkbox) near a submit button
+      // Method 2: Check for matching questions — AUTO-SKIP them
+      if (!hasMcq) {
+        const matchingElements = getDeepElements('object-matching-dropdown-view');
+        if (matchingElements.length > 0) {
+          console.log("NetAcad Bot: ⏭ Matching question detected in full bot mode — auto-skipping.");
+          updateDevOverlay('⏭ Skipping', 'Matching question — skipping...');
+          // "Skip Question" is a div.skip-inner, not a <button>
+          const skipBtn = getDeepElements('[class*="skip"], button, div, a, [role="button"]').find(el => {
+            const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const cls = (el.className || '').toString().toLowerCase();
+            const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+            return !isDisabled && (
+              cls.includes('skip-inner') ||
+              cls.includes('skip__inner') ||
+              t === 'skip question' ||
+              t === 'skip'
+            );
+          });
+          if (skipBtn) {
+            skipBtn.click();
+            botLastScrapeUrl = '';
+            if (window.netAcadBotState) { window.netAcadBotState.submitFired = false; window.netAcadBotState.lastQuizProcessedAt = 0; }
+            if (window._netAcadAnsweredSignatures) window._netAcadAnsweredSignatures.clear();
+            return;
+          }
+          // No skip button — don't treat as MCQ, let the bot proceed to navigation
+        }
+      }
+
       if (!hasMcq) {
         const allInputs = getDeepElements('input, [role="radio"], [role="checkbox"]');
         const quizInputs = allInputs.filter(i => {
@@ -735,13 +953,8 @@ function runAutonomousBotLoop() {
     const allClickables = [
       ...getDeepElements('button'),
       ...getDeepElements('a'),
+      ...getDeepElements('[role="button"]'),
     ];
-    // Also include elements with role="button"
-    getDeepElements('*').forEach(el => {
-      if (el.getAttribute && el.getAttribute('role') === 'button') {
-        allClickables.push(el);
-      }
-    });
 
     // Categorize all buttons on the page
     let submitBtn = null;
@@ -793,7 +1006,13 @@ function runAutonomousBotLoop() {
         if (i.tagName.toLowerCase() === 'input') return (i.type === 'radio' || i.type === 'checkbox') && i.checked;
         return i.getAttribute('aria-checked') === 'true';
       });
-      const hasAnswered = checkedInputs.length > 0;
+      // Also check for answered matching questions
+      const matchingSelects = getDeepElements('[class*="matching__select-container"]');
+      const hasMatchingAnswers = matchingSelects.length > 0 && matchingSelects.some(el => {
+        const text = (el.innerText || el.textContent || '').trim();
+        return text.length > 0 && text !== '--';
+      });
+      const hasAnswered = checkedInputs.length > 0 || hasMatchingAnswers;
       const wasProcessed = window.netAcadBotState && window.netAcadBotState.lastQuizProcessedAt > 0;
       
       if (hasAnswered && wasProcessed) {
@@ -809,6 +1028,10 @@ function runAutonomousBotLoop() {
             setTimeout(() => {
               botLastScrapeUrl = '';
               if (window.netAcadBotState) window.netAcadBotState.submitFired = false;
+              // Clear answered signatures when moving to next question
+              if (window._netAcadAnsweredSignatures) {
+                window._netAcadAnsweredSignatures.clear();
+              }
               console.log("NetAcad Bot: 🔄 Ready for next question.");
             }, 2000);
           }, 100);
@@ -885,19 +1108,19 @@ function runAutonomousBotLoop() {
         return;
       }
 
-      // Step 2: Find the progress bar slider and click near the end
+      // Step 2: Find the progress bar slider and click at 100% (the very end)
       const progressHolder = vjsContainer.querySelector('.vjs-progress-holder') ||
                              vjsContainer.querySelector('.vjs-slider');
       
       if (progressHolder) {
         const rect = progressHolder.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) {
-          // Click at 99% of the progress bar width — let the last 1% play to reach 100%
-          const clickX = rect.left + (rect.width * 0.99);
+          // Click at 100% of the progress bar width to jump directly to the end
+          const clickX = rect.left + (rect.width * 1.0) - 1; // -1px to stay within bounds
           const clickY = rect.top + (rect.height / 2);
           
-          console.log(`NetAcad Bot: ⏩ Clicking progress bar at 99% (x=${Math.round(clickX)}, y=${Math.round(clickY)})`);
-          updateDevOverlay('⏩ Video', 'Seeking to 99%... waiting for 100%');
+          console.log(`NetAcad Bot: ⏩ Clicking progress bar at 100% (x=${Math.round(clickX)}, y=${Math.round(clickY)})`);
+          updateDevOverlay('⏩ Video', 'Seeking to 100%...');
           
           // Simulate mousedown + mouseup click on the progress bar
           const mouseOpts = { bubbles: true, cancelable: true, clientX: clickX, clientY: clickY };
@@ -905,14 +1128,25 @@ function runAutonomousBotLoop() {
           progressHolder.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
           progressHolder.dispatchEvent(new MouseEvent('click', mouseOpts));
           
-          videoSkipped = true;
-          console.log("NetAcad Bot: ⏩ Video.js progress bar clicked at 99%. Waiting 2s for 100%...");
+          // Also try programmatic seek as a belt-and-suspenders approach
+          try {
+            if (video.duration && isFinite(video.duration)) {
+              video.currentTime = video.duration;
+            }
+            video.dispatchEvent(new Event('ended', { bubbles: true }));
+            video.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+          } catch (e) {
+            console.debug("NetAcad Bot: Programmatic video seek failed (expected for blob/MSE):", e.message);
+          }
           
-          // Wait 2 seconds for the video to finish the last 1% and reach 100%
+          videoSkipped = true;
+          console.log("NetAcad Bot: ⏩ Video.js progress bar clicked at 100%. Marking as complete.");
+          
+          // Short delay to let the player register completion, then mark as skipped
           setTimeout(() => {
             video.dataset.botSkipped = "true";
-            console.log("NetAcad Bot: ✅ Video should be at 100% now. Marked as skipped.");
-          }, 2000);
+            console.log("NetAcad Bot: ✅ Video at 100%. Marked as skipped.");
+          }, 1000);
         }
       } else {
         console.warn("NetAcad Bot: ⏩ Video.js container found but no progress bar. Trying fallback.");
@@ -922,6 +1156,13 @@ function runAutonomousBotLoop() {
         if (durationDisplay) {
           durationDisplay.click();
         }
+        // Also try programmatic seek
+        try {
+          if (video.duration && isFinite(video.duration)) {
+            video.currentTime = video.duration;
+          }
+          video.dispatchEvent(new Event('ended', { bubbles: true }));
+        } catch (e) { /* ignore */ }
         video.dataset.botSkipped = "true";
         videoSkipped = true;
       }
@@ -1035,6 +1276,40 @@ function runAutonomousBotLoop() {
     }
 
     // ============================================================
+    // PRIORITY 4.7: Click "open-dialog" activity buttons
+    // These are buttons like "Logical and Physical Mode Exploration" that
+    // open links/activities required to complete the module.
+    // Button classes: open-dialog, btn-text, btn__action
+    // ============================================================
+    const dialogButtons = getDeepElements('button').filter(btn => {
+      const cls = (btn.className || '').toString();
+      const isDisabled = btn.disabled || btn.classList.contains('disabled') || btn.getAttribute('aria-disabled') === 'true';
+      const alreadyClicked = btn.dataset.botDialogClicked === 'true';
+      // Match buttons with open-dialog class or btn__action class (NetAcad activity buttons)
+      return !isDisabled && !alreadyClicked && (
+        cls.includes('open-dialog') || 
+        (cls.includes('btn__action') && cls.includes('btn-text'))
+      );
+    });
+
+    if (dialogButtons.length > 0) {
+      const btn = dialogButtons[0];
+      const btnText = (btn.innerText || btn.textContent || '').trim();
+      const rect = btn.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        console.log(`NetAcad Bot: 📎 Clicking activity button: "${btnText}"`);
+        updateDevOverlay('📎 Activity', `Opening: ${btnText.substring(0, 40)}...`);
+        btn.click();
+        btn.dataset.botDialogClicked = 'true';
+        // Refocus back to this tab after the new tab opens so the bot continues here
+        setTimeout(() => {
+          chrome.runtime.sendMessage({ action: "refocusTab" });
+        }, 1000);
+        return;
+      }
+    }
+
+    // ============================================================
     // PRIORITY 5: Scroll down through reading content
     // ============================================================
     
@@ -1133,6 +1408,10 @@ function runAutonomousBotLoop() {
         if (window.netAcadBotState) {
           window.netAcadBotState.submitFired = false;
           window.netAcadBotState.lastQuizProcessedAt = 0;
+        }
+        // Clear answered signatures for the new page
+        if (window._netAcadAnsweredSignatures) {
+          window._netAcadAnsweredSignatures.clear();
         }
       } else {
         updateDevOverlay('✅ Done', 'Scrolled to bottom. No ">" found.');

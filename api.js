@@ -269,3 +269,115 @@ async function getAiAnswersForBatch(questionsDataArray, apiKey = null, attemptCo
     return { error: "Error connecting to Gemini API for batch. Check console." };
   }
 }
+
+// ─────────────────────────────────────────────
+// MATCHING / ORDERING QUESTIONS — with auto-rotation on 429
+// ─────────────────────────────────────────────
+
+async function getAiAnswerForMatching(questionText, categories, options, apiKey = null, attemptCount = 0) {
+  // If no key passed, read from storage (supports rotation)
+  let keyInfo = null;
+  if (!apiKey) {
+    keyInfo = await getActiveApiKey();
+    if (!keyInfo) {
+      console.error("Error: No Gemini API Keys configured.");
+      return "Error: Gemini API Key not available. Please set it in the extension popup.";
+    }
+    apiKey = keyInfo.key;
+  }
+
+  let prompt = `You are answering a matching/ordering question from a networking quiz.
+
+The question has a set of CATEGORIES on the left side and a set of OPTIONS on the right side.
+You must match each category to the correct option.
+
+IMPORTANT: Return ONLY a valid JSON object where each key is the EXACT category text and each value is the EXACT option text that matches it.
+Do NOT add any explanation, markdown formatting, or extra text. Only return the raw JSON object.
+
+Question:
+${questionText}
+
+Categories (left side):
+`;
+  categories.forEach((cat, i) => {
+    prompt += `${i + 1}. ${cat}\n`;
+  });
+
+  prompt += `\nOptions (right side):\n`;
+  options.forEach((opt, i) => {
+    prompt += `${String.fromCharCode(65 + i)}. ${opt}\n`;
+  });
+
+  prompt += `\nExample output format:
+{"step 1": "client sends FIN.", "step 2": "server sends ACK.", "step 3": "client sends FIN.", "step 4": "client sends ACK."}
+
+Return the JSON object now:`;
+
+  try {
+    const apiUrl = await getActiveModelUrl();
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+        },
+      }),
+    });
+
+    // Auto-rotate on quota/rate limit errors
+    if (response.status === 429 || response.status === 403) {
+      let apiReason = "";
+      try {
+        const errorData = await response.clone().json();
+        apiReason = errorData.error && errorData.error.message ? errorData.error.message : JSON.stringify(errorData);
+      } catch (e) {
+        apiReason = await response.clone().text();
+      }
+      console.warn(`NetAcad API: ⚠️ Matching key quota hit (${response.status}). Reason: ${apiReason}. Rotating key...`);
+      
+      const freshKeyInfo = await getActiveApiKey();
+      const totalKeys = freshKeyInfo ? freshKeyInfo.total : 1;
+      
+      if (attemptCount < totalKeys - 1) {
+        const newKeyInfo = await rotateToNextKey();
+        if (newKeyInfo) {
+          await new Promise(r => setTimeout(r, 1000));
+          return getAiAnswerForMatching(questionText, categories, options, null, attemptCount + 1);
+        }
+      }
+      
+      const errorContext = response.status === 403 ? "Access Forbidden / Key Invalid" : "Rate Limit / Quota Exceeded";
+      return `Error: ${response.status} All API keys exhausted. ${errorContext} on all ${totalKeys} key(s). Last API message: ${apiReason}`;
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error("Gemini API Matching Error:", errorData);
+      return `Error calling Gemini API: ${response.status} ${response.statusText}.`;
+    }
+
+    const data = await response.json();
+    if (
+      data.candidates &&
+      data.candidates.length > 0 &&
+      data.candidates[0].content &&
+      data.candidates[0].content.parts &&
+      data.candidates[0].content.parts.length > 0
+    ) {
+      const rawText = data.candidates[0].content.parts[0].text.trim();
+      console.debug("Gemini API Matching Raw Response:", rawText);
+      return rawText;
+    } else {
+      console.error("Unexpected response structure from Gemini API for matching:", data);
+      return "Error: Could not extract answer from Gemini matching response.";
+    }
+  } catch (error) {
+    console.error("Error fetching from Gemini API for matching:", error);
+    return "Error connecting to Gemini API for matching. Check console.";
+  }
+}

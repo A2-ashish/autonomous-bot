@@ -790,3 +790,625 @@ function autoSelectMatchingAnswers(answerElements, individualAnswers) {
 
   return checkedCount;
 }
+
+// -----------------------------------------
+// MATCHING / ORDERING QUESTION SUPPORT
+// -----------------------------------------
+
+/**
+ * Extracts data from a matching/ordering question (object-matching-dropdown-view).
+ * Returns { questionText, categories: string[], options: string[], categoryElements: Element[] }
+ */
+function extractMatchingQuestionData(matchingViewElement, index) {
+  let questionText = "";
+  let categories = [];
+  let options = [];
+  let categoryContainers = [];
+
+  try {
+    // The matching view may be a custom element with shadow DOM
+    const root = matchingViewElement.shadowRoot || matchingViewElement;
+
+    // 1. Extract the question text — look in ancestor elements or sibling elements
+    // The question text is typically ABOVE the matching component in the page
+    // Try to find it by looking at parent containers
+    let questionEl = null;
+
+    // Method 1: Look for prompt/body elements inside the component's shadow
+    if (matchingViewElement.shadowRoot) {
+      questionEl = matchingViewElement.shadowRoot.querySelector('.component__body-inner, .prompt, .matching__prompt, .question-text');
+    }
+
+    // Method 2: Look upwards from the matching element itself
+    if (!questionEl) {
+      let parent = matchingViewElement.parentElement;
+      for (let depth = 0; depth < 10 && parent; depth++) {
+        const candidates = parent.querySelectorAll('h1, h2, h3, h4, p, .prompt, .question-text, .component__body-inner');
+        for (const el of candidates) {
+          const text = (el.innerText || '').trim();
+          if (text.length > 15 && !el.contains(matchingViewElement)) {
+            questionEl = el;
+            break;
+          }
+        }
+        if (questionEl) break;
+        // Also check shadow roots of parents
+        if (parent.shadowRoot) {
+          const shadowCandidates = parent.shadowRoot.querySelectorAll('h1, h2, h3, h4, p, .prompt, .question-text, .component__body-inner');
+          for (const el of shadowCandidates) {
+            const text = (el.innerText || '').trim();
+            if (text.length > 15) {
+              questionEl = el;
+              break;
+            }
+          }
+          if (questionEl) break;
+        }
+        parent = parent.parentElement;
+      }
+    }
+
+    // Method 3: Use getDeepElements to search for base-view inside a parent tree
+    if (!questionEl && window.getDeepElements) {
+      // Try finding the base-view that contains this matching element
+      const baseViews = window.getDeepElements('base-view');
+      for (const bv of baseViews) {
+        if (bv.shadowRoot) {
+          const bodyInner = bv.shadowRoot.querySelector('.component__body-inner');
+          if (bodyInner) {
+            const text = (bodyInner.innerText || '').trim();
+            if (text.length > 15) {
+              questionEl = bodyInner;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (questionEl) {
+      questionText = (questionEl.innerText || '').trim();
+    } else {
+      questionText = `Matching/ordering question ${index + 1} (question text not extracted)`;
+    }
+
+    // 2. Extract categories (left side) and options (right side)
+    // Look for category containers inside shadow DOM or direct DOM
+    const searchRoots = [root];
+    if (matchingViewElement.shadowRoot) {
+      // Also search deeper shadow DOMs
+      const innerCustomEls = Array.from(matchingViewElement.shadowRoot.querySelectorAll('*'));
+      for (const el of innerCustomEls) {
+        if (el.shadowRoot) searchRoots.push(el.shadowRoot);
+      }
+    }
+
+    for (const searchRoot of searchRoots) {
+      // Find category titles (left side labels like "step 1", "step 2", etc.)
+      const titleEls = searchRoot.querySelectorAll('.matching__item-title, .matching__item-title_inner, [class*="matching__item-title"]');
+      if (titleEls.length > 0) {
+        titleEls.forEach(el => {
+          const titleInner = el.querySelector('.matching__item-title_inner') || el;
+          const text = (titleInner.innerText || titleInner.textContent || '').trim();
+          if (text && !categories.includes(text)) {
+            categories.push(text);
+          }
+        });
+      }
+
+      // Find category item containers (for auto-selecting later)
+      const containers = searchRoot.querySelectorAll('[class*="objectMatching-category-item-container"], .objectMatching-category-item-container');
+      if (containers.length > 0) {
+        categoryContainers = Array.from(containers);
+      }
+
+      // Find option items (right side labels like "client sends FIN.", "client sends ACK.", etc.)
+      const optionEls = searchRoot.querySelectorAll('.matching__select-container, [class*="matching__select"], [class*="options-wrapper"]');
+      if (optionEls.length > 0) {
+        // The options are typically in a shared pool, find unique option texts
+        // Look for all available option elements that can be selected
+        const optionItems = searchRoot.querySelectorAll('[class*="category-item-number"], [class*="options-wrapper"] [class*="item"], [class*="option-label"], [class*="options-header"]');
+        optionItems.forEach(el => {
+          const text = (el.innerText || el.textContent || '').trim();
+          if (text && !options.includes(text) && text.length > 1) {
+            options.push(text);
+          }
+        });
+
+        // Fallback: If no options found via specific classes, extract from select/dropdown elements
+        if (options.length === 0) {
+          // Look for <select> elements and their <option> children
+          const selectEls = searchRoot.querySelectorAll('select, [class*="select"]');
+          selectEls.forEach(sel => {
+            const optChildren = sel.querySelectorAll('option, [class*="item"], [class*="option"]');
+            optChildren.forEach(opt => {
+              const text = (opt.innerText || opt.textContent || '').trim();
+              if (text && !options.includes(text) && text.length > 1 && text !== '--' && text !== '-') {
+                options.push(text);
+              }
+            });
+          });
+        }
+
+        // Fallback 2: Extract unique non-category text from within the select containers themselves
+        if (options.length === 0) {
+          optionEls.forEach(container => {
+            const allText = container.querySelectorAll('div, span, p, li');
+            allText.forEach(el => {
+              const text = (el.innerText || el.textContent || '').trim();
+              if (text && !options.includes(text) && !categories.includes(text) && 
+                  text.length > 2 && !/^[A-Z]$/.test(text) && text !== '--') {
+                options.push(text);
+              }
+            });
+          });
+        }
+      }
+    }
+
+    // Fallback: use getDeepElements to find matching elements in deeply nested shadow DOMs
+    if ((categories.length === 0 || options.length === 0) && window.getDeepElements) {
+      // Search specifically within the matching view's subtree
+      const allEls = [];
+      const queue = [matchingViewElement];
+      while (queue.length > 0) {
+        const node = queue.shift();
+        if (!node) continue;
+        if (node.shadowRoot) queue.push(node.shadowRoot);
+        const children = node.children || node.childNodes;
+        if (children) {
+          for (let i = 0; i < children.length; i++) {
+            if (children[i].nodeType === 1) {
+              allEls.push(children[i]);
+              queue.push(children[i]);
+            }
+          }
+        }
+      }
+
+      if (categories.length === 0) {
+        // Look for matching item title elements
+        allEls.forEach(el => {
+          const cls = (el.className || '').toString();
+          if (cls.includes('matching__item-title') || cls.includes('matching_item-title')) {
+            const inner = el.querySelector('[class*="title_inner"]') || el;
+            const text = (inner.innerText || inner.textContent || '').trim();
+            if (text && !categories.includes(text)) {
+              categories.push(text);
+            }
+          }
+        });
+      }
+
+      if (options.length === 0) {
+        // Look for option text elements — they are typically sibling radio-like items next to each category
+        // In the matching UI, each row has a category label + circular radio buttons for each option
+        // The options are usually displayed as column headers
+        allEls.forEach(el => {
+          const cls = (el.className || '').toString();
+          // Options column header text
+          if (cls.includes('category-item-number') || cls.includes('option-label') || cls.includes('options-header')) {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (text && !options.includes(text) && text.length > 1) {
+              options.push(text);
+            }
+          }
+        });
+
+        // If still no options, look for the option text items that appear alongside categories
+        if (options.length === 0) {
+          // Find all text nodes near radio/select elements
+          allEls.forEach(el => {
+            const cls = (el.className || '').toString();
+            if (cls.includes('container-options-wrapper') || cls.includes('item-container')) {
+              // Get all unique text spans that look like answer options
+              const textEls = el.querySelectorAll('div, span, p');
+              textEls.forEach(te => {
+                const text = (te.innerText || te.textContent || '').trim();
+                // Filter out category numbers (A, B, C, D) and empty strings
+                if (text && text.length > 2 && !options.includes(text) && !/^[A-Z]$/.test(text)) {
+                  options.push(text);
+                }
+              });
+            }
+          });
+        }
+      }
+
+      // Collect category containers if not found yet
+      if (categoryContainers.length === 0) {
+        categoryContainers = allEls.filter(el => {
+          const cls = (el.className || '').toString();
+          return cls.includes('objectMatching-category-item-container') || cls.includes('category-item-container');
+        });
+      }
+    }
+
+    console.debug(`NetAcad UI: Matching Q${index + 1} extraction: ${categories.length} categories, ${options.length} options.`);
+    console.debug(`  Categories:`, categories);
+    console.debug(`  Options:`, options);
+
+  } catch (e) {
+    console.error(`NetAcad UI: Error extracting matching question ${index + 1}:`, e);
+  }
+
+  return { questionText, categories, options, categoryContainers };
+}
+
+/**
+ * Auto-selects the correct matching/ordering answers by clicking on the dropdown items
+ * or radio buttons in a matching grid.
+ * ASYNC — processes each item sequentially to avoid UI conflicts.
+ * @param {Element} matchingViewElement - The object-matching-dropdown-view element
+ * @param {Object} mappings - AI response: { "category text": "option text", ... }
+ * @param {string[]} [optionsList] - Ordered list of option texts (used for radio-grid matching)
+ */
+async function autoSelectMatchingDropdowns(matchingViewElement, mappings, optionsList) {
+  if (!mappings || typeof mappings !== 'object') {
+    console.warn("NetAcad UI: autoSelectMatchingDropdowns called with invalid mappings:", mappings);
+    return;
+  }
+
+  console.debug("NetAcad UI: Auto-selecting matching answers with mappings:", mappings);
+  if (optionsList) {
+    console.debug("NetAcad UI: Options list provided (radio-grid mode):", optionsList);
+  }
+
+  // Traverse the entire subtree including shadow DOMs to find all elements
+  const allEls = [];
+  const queue = [matchingViewElement];
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (!node) continue;
+    if (node.shadowRoot) queue.push(node.shadowRoot);
+    const children = node.children || node.childNodes;
+    if (children) {
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].nodeType === 1) {
+          allEls.push(children[i]);
+          queue.push(children[i]);
+        }
+      }
+    }
+  }
+
+  // Find all category rows — each row contains a title and a select/dropdown area or radio buttons
+  const categoryRows = allEls.filter(el => {
+    const cls = (el.className || '').toString();
+    return cls.includes('objectMatching-category-item-container') || 
+           cls.includes('category-item-container') ||
+           cls.includes('matching__item');
+  });
+
+  // ============================================================
+  // STRATEGY A: Structured rows with dropdowns or radio buttons
+  // ============================================================
+  if (categoryRows.length > 0) {
+    console.debug(`NetAcad UI: Found ${categoryRows.length} structured category rows.`);
+
+    for (const row of categoryRows) {
+      let categoryText = '';
+      const rowEls = [];
+      const rowQueue = [row];
+      while (rowQueue.length > 0) {
+        const node = rowQueue.shift();
+        if (!node) continue;
+        if (node.shadowRoot) rowQueue.push(node.shadowRoot);
+        const children = node.children || node.childNodes;
+        if (children) {
+          for (let i = 0; i < children.length; i++) {
+            if (children[i].nodeType === 1) {
+              rowEls.push(children[i]);
+              rowQueue.push(children[i]);
+            }
+          }
+        }
+      }
+
+      const titleEl = rowEls.find(el => {
+        const cls = (el.className || '').toString();
+        return cls.includes('matching__item-title_inner') || cls.includes('title_inner');
+      }) || rowEls.find(el => {
+        const cls = (el.className || '').toString();
+        return cls.includes('matching__item-title');
+      });
+
+      if (titleEl) {
+        categoryText = (titleEl.innerText || titleEl.textContent || '').trim();
+      }
+
+      if (!categoryText) continue;
+
+      const targetOption = findMatchingOption(categoryText, mappings);
+      if (!targetOption) {
+        console.debug(`NetAcad UI: No mapping found for category "${categoryText}"`);
+        continue;
+      }
+
+      // Try dropdown containers first
+      const selectContainer = rowEls.find(el => {
+        const cls = (el.className || '').toString();
+        return cls.includes('matching__select-container') || cls.includes('select-container');
+      });
+
+      if (selectContainer) {
+        await clickMatchingOption(selectContainer, targetOption, matchingViewElement);
+        await new Promise(r => setTimeout(r, 300));
+      } else {
+        // RADIO-GRID: Find radio buttons in this row and use option index
+        const radios = rowEls.filter(el => {
+          return (el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox')) ||
+                 el.getAttribute('role') === 'radio' || el.getAttribute('role') === 'checkbox';
+        });
+
+        if (radios.length > 0 && optionsList && optionsList.length > 0) {
+          // Use the ordered options list to find the correct radio index
+          const optIdx = findOptionIndexByText(targetOption, optionsList);
+          if (optIdx >= 0 && optIdx < radios.length) {
+            radios[optIdx].click();
+            console.debug(`NetAcad UI: ✅ Clicked radio[${optIdx}] for "${categoryText}" -> "${targetOption}"`);
+            await new Promise(r => setTimeout(r, 200));
+          } else {
+            console.warn(`NetAcad UI: ⚠️ Option index ${optIdx} out of range (${radios.length} radios) for "${categoryText}" -> "${targetOption}"`);
+          }
+        } else if (radios.length > 0) {
+          // Fallback: try class-based option index
+          const optionIndex = findOptionIndex(targetOption, allEls);
+          if (optionIndex >= 0 && optionIndex < radios.length) {
+            radios[optionIndex].click();
+            console.debug(`NetAcad UI: ✅ Clicked radio[${optionIndex}] (class-based) for "${categoryText}" -> "${targetOption}"`);
+            await new Promise(r => setTimeout(r, 200));
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  // ============================================================
+  // STRATEGY B: Title + Select container pairs (dropdown style)
+  // ============================================================
+  const titleEls = allEls.filter(el => {
+    const cls = (el.className || '').toString();
+    return cls.includes('matching__item-title');
+  });
+
+  const selectContainers = allEls.filter(el => {
+    const cls = (el.className || '').toString();
+    return cls.includes('matching__select-container');
+  });
+
+  if (titleEls.length > 0 && selectContainers.length > 0) {
+    console.debug(`NetAcad UI: Strategy B — ${titleEls.length} titles, ${selectContainers.length} select containers.`);
+
+    for (let i = 0; i < titleEls.length && i < selectContainers.length; i++) {
+      const titleEl = titleEls[i];
+      const selectContainer = selectContainers[i];
+      const titleInner = titleEl.querySelector('[class*="title_inner"]') || titleEl;
+      const categoryText = (titleInner.innerText || titleInner.textContent || '').trim();
+      
+      const targetOption = findMatchingOption(categoryText, mappings);
+      if (targetOption) {
+        await clickMatchingOption(selectContainer, targetOption, matchingViewElement);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    return;
+  }
+
+  // ============================================================
+  // STRATEGY C: Radio-grid fallback (categories + radios + options)
+  // Used when no structured rows or dropdown containers are found
+  // but radio buttons exist alongside category/option text
+  // ============================================================
+  const allRadios = allEls.filter(el => {
+    return (el.tagName === 'INPUT' && (el.type === 'radio' || el.type === 'checkbox')) ||
+           el.getAttribute('role') === 'radio' || el.getAttribute('role') === 'checkbox';
+  });
+
+  if (allRadios.length > 0 && optionsList && optionsList.length > 0) {
+    console.debug(`NetAcad UI: Strategy C (radio-grid) — ${allRadios.length} radios, ${optionsList.length} options.`);
+
+    // In a radio grid, radios are arranged as: [row0_radio0, row0_radio1, ..., row1_radio0, row1_radio1, ...]
+    // Each row has optionsList.length radio buttons
+    const numOptions = optionsList.length;
+    const numCategories = Math.floor(allRadios.length / numOptions);
+    const mappingEntries = Object.entries(mappings);
+
+    for (let catIdx = 0; catIdx < numCategories && catIdx < mappingEntries.length; catIdx++) {
+      const [categoryText, targetOption] = mappingEntries[catIdx];
+      const optIdx = findOptionIndexByText(targetOption, optionsList);
+
+      if (optIdx >= 0) {
+        const radioIdx = (catIdx * numOptions) + optIdx;
+        if (radioIdx < allRadios.length) {
+          allRadios[radioIdx].click();
+          console.debug(`NetAcad UI: ✅ Radio-grid: clicked radio[${radioIdx}] for "${categoryText}" -> "${targetOption}" (row=${catIdx}, col=${optIdx})`);
+          await new Promise(r => setTimeout(r, 200));
+        }
+      } else {
+        console.warn(`NetAcad UI: ⚠️ Could not find option index for "${targetOption}" in options list.`);
+      }
+    }
+    return;
+  }
+
+  console.warn("NetAcad UI: ⚠️ No matching strategy worked. Could not auto-select answers.");
+}
+
+/**
+ * Find the matching option text for a given category from the AI mappings.
+ */
+function findMatchingOption(categoryText, mappings) {
+  const normalizedCategory = categoryText.toLowerCase().trim();
+  
+  // Direct match
+  for (const [key, value] of Object.entries(mappings)) {
+    if (key.toLowerCase().trim() === normalizedCategory) {
+      return value;
+    }
+  }
+  
+  // Partial/fuzzy match
+  for (const [key, value] of Object.entries(mappings)) {
+    const normalizedKey = key.toLowerCase().trim();
+    if (normalizedKey.includes(normalizedCategory) || normalizedCategory.includes(normalizedKey)) {
+      return value;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Find the index of an option in an ordered options list by fuzzy text matching.
+ * Used for radio-grid matching where the column index corresponds to the option position.
+ * @param {string} targetOption - The option text to find
+ * @param {string[]} optionsList - Ordered list of option texts
+ * @returns {number} The index of the matching option, or -1 if not found
+ */
+function findOptionIndexByText(targetOption, optionsList) {
+  const normalizedTarget = targetOption.toLowerCase().trim().replace(/[\s\W]+/g, '');
+  
+  // Pass 1: Exact match (after normalization)
+  for (let i = 0; i < optionsList.length; i++) {
+    const normalizedOpt = optionsList[i].toLowerCase().trim().replace(/[\s\W]+/g, '');
+    if (normalizedOpt === normalizedTarget) {
+      return i;
+    }
+  }
+  
+  // Pass 2: Contains match (one contains the other)
+  for (let i = 0; i < optionsList.length; i++) {
+    const normalizedOpt = optionsList[i].toLowerCase().trim().replace(/[\s\W]+/g, '');
+    if (normalizedOpt.includes(normalizedTarget) || normalizedTarget.includes(normalizedOpt)) {
+      return i;
+    }
+  }
+
+  // Pass 3: Significant word overlap (for cases where AI slightly rephrases)
+  const targetWords = targetOption.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  if (targetWords.length > 0) {
+    let bestIdx = -1;
+    let bestScore = 0;
+    for (let i = 0; i < optionsList.length; i++) {
+      const optWords = optionsList[i].toLowerCase().split(/\s+/).filter(w => w.length > 3);
+      const matches = targetWords.filter(tw => optWords.some(ow => ow.includes(tw) || tw.includes(ow)));
+      const score = matches.length / Math.max(targetWords.length, optWords.length);
+      if (score > bestScore && score >= 0.5) { // At least 50% word overlap
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0) return bestIdx;
+  }
+  
+  return -1;
+}
+
+/**
+ * Find the index of an option in the available options list.
+ */
+function findOptionIndex(targetOption, allEls) {
+  const normalizedTarget = targetOption.toLowerCase().trim().replace(/[\s\W]+/g, '');
+  
+  const optionEls = allEls.filter(el => {
+    const cls = (el.className || '').toString();
+    return cls.includes('category-item-number') || cls.includes('option-label');
+  });
+
+  for (let i = 0; i < optionEls.length; i++) {
+    const text = (optionEls[i].innerText || optionEls[i].textContent || '').trim();
+    const normalizedText = text.toLowerCase().trim().replace(/[\s\W]+/g, '');
+    if (normalizedText === normalizedTarget || normalizedText.includes(normalizedTarget) || normalizedTarget.includes(normalizedText)) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * Click the correct option in a matching dropdown/select container.
+ * Returns a Promise that resolves after the option is clicked.
+ * @param {Element} selectContainer - The select/dropdown container to click
+ * @param {string} targetOption - The option text to select
+ * @param {Element} scopeRoot - The matching view element to scope the search within
+ */
+function clickMatchingOption(selectContainer, targetOption, scopeRoot) {
+  const normalizedTarget = targetOption.toLowerCase().trim().replace(/[\s\W]+/g, '');
+
+  // Step 1: Click the select container to open the dropdown
+  selectContainer.click();
+  console.debug(`NetAcad UI: Clicked select container to open dropdown for target: "${targetOption}"`);
+
+  // Step 2: Return a Promise that resolves after finding and clicking the correct option
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      // Search for dropdown options — scope to the matching view element and its shadow DOM
+      // instead of the entire document body to avoid cross-contamination
+      const dropdownItems = [];
+      const searchRoots = [scopeRoot || document.body];
+
+      // Traverse the scoped root's shadow DOM tree to find dropdown items
+      const freshQueue = [...searchRoots];
+      while (freshQueue.length > 0) {
+        const node = freshQueue.shift();
+        if (!node) continue;
+        if (node.shadowRoot) freshQueue.push(node.shadowRoot);
+        const children = node.children || node.childNodes;
+        if (children) {
+          for (let i = 0; i < children.length; i++) {
+            if (children[i].nodeType === 1) {
+              const cls = (children[i].className || '').toString();
+              // Look for dropdown option items
+              if (cls.includes('dropdown') || cls.includes('option') || cls.includes('select') || cls.includes('menu-item') || cls.includes('list-item')) {
+                dropdownItems.push(children[i]);
+              }
+              freshQueue.push(children[i]);
+            }
+          }
+        }
+      }
+
+      // Also search within the select container itself (dropdown might render inside it)
+      const containerDescendants = selectContainer.querySelectorAll('*');
+      containerDescendants.forEach(el => dropdownItems.push(el));
+
+      // Also check if a dropdown overlay was rendered at document level (some UIs do this)
+      // — but only grab elements that appeared AFTER the click
+      const bodyDropdowns = document.querySelectorAll('[class*="dropdown"], [class*="menu-item"], [class*="list-item"], [class*="overlay"]');
+      bodyDropdowns.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          dropdownItems.push(el);
+          // Also include children of these overlays
+          el.querySelectorAll('*').forEach(child => dropdownItems.push(child));
+        }
+      });
+
+      // Find the option with matching text
+      let clicked = false;
+      for (const item of dropdownItems) {
+        const text = (item.innerText || item.textContent || '').trim();
+        if (!text || text.length === 0) continue;
+        const normalizedText = text.toLowerCase().trim().replace(/[\s\W]+/g, '');
+        
+        if (normalizedText === normalizedTarget || normalizedText.includes(normalizedTarget) || normalizedTarget.includes(normalizedText)) {
+          item.click();
+          console.debug(`NetAcad UI: ✅ Selected matching option: "${text}" for target: "${targetOption}"`);
+          clicked = true;
+          break;
+        }
+      }
+
+      if (!clicked) {
+        console.warn(`NetAcad UI: ⚠️ Could not find dropdown option for: "${targetOption}". Closing dropdown.`);
+        // Try clicking the select container again to close it
+        selectContainer.click();
+      }
+
+      resolve(clicked);
+    }, 600); // 600ms to let the dropdown fully render
+  });
+}
