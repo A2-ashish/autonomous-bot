@@ -2,79 +2,180 @@
   <img src="images/logo.png" alt="NetAcad Autonomous Bot Logo" width="200"/>
 </p>
 
-# NetAcad Autonomous Bot
+<h1 align="center">NetAcad Autonomous Bot</h1>
 
-NetAcad Assistant is a browser extension designed to assist users on Cisco NetAcad by automatically scraping quiz questions and suggesting answers using Google Gemini AI. It streamlines the process of answering dynamically loaded NetAcad quizzes, saving time and reducing manual effort.
+<p align="center">
+  <strong>A fully autonomous AI-powered Chrome extension that completes Cisco NetAcad courses — quizzes, videos, reading material — without human intervention.</strong>
+</p>
 
-## What Does It Do?
-- **Scrapes** multiple-choice questions and answer options from NetAcad quiz pages (even when questions are loaded dynamically via AJAX or iframes).
-- **Batches** all questions on a page and sends them in a single request to the Gemini AI API, reducing API usage and improving efficiency.
-- **Displays** AI-suggested answers directly below each question, with support for both single-answer and multi-answer (checkbox/select-all) questions.
-- **Allows** users to refresh the AI answer for any individual question.
-- **Automatically detects** when new questions are loaded (e.g., when navigating between questions) and re-scrapes as needed.
+<p align="center">
+  <img src="https://img.shields.io/badge/Manifest-V3-blue?style=flat-square" alt="Manifest V3"/>
+  <img src="https://img.shields.io/badge/AI-Google%20Gemini-orange?style=flat-square" alt="Google Gemini"/>
+  <img src="https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square" alt="Active"/>
+</p>
 
-This will allow you to:
-- **Saves time:** No more copying and pasting questions into AI chatbots or searching for answers manually.
-- **Reduces API costs:** By batching questions, it minimizes the number of requests to the Gemini API.
-- **Works with dynamic content:** MutationObserver ensures the extension adapts to NetAcad's dynamic page loads and iframes.
-- **User-friendly:** Clean UI, easy setup, and one-click operation.
-> Disable this plugin if you don't want see the answer and answering the question on your own which is a good thing instead of using this tool.
+---
 
-## Technologies Used
-- **JavaScript (ES6+)**
-- **Chrome Extensions API (Manifest V3)**
-- **Shadow DOM and MutationObserver** for monitoring changes from dynamic pages and scraping
-- **Google Gemini AI API** for answer suggestions
+## ✨ Features
 
-## How to Install and Use
-1. **Clone or Download** this repository.
-2. **Get a Google Gemini API Key:**
-   - Visit [Google AI Studio](https://aistudio.google.com/app/apikey) and generate an API key.
-3. **Load the Extension in Chrome:**
-   - Go to `chrome://extensions/`.
-   - Enable "Developer mode" (top right).
-   - Click "Load unpacked" and select the project folder.
-4. **Set Your API Key:**
-   - Click the extension icon.
-   - Enter your Gemini API key in the popup and click "Save API Key".
-5. **Use on NetAcad:**
-   - Navigate to a NetAcad quiz page.
-   - Click the extension icon and press "Process Questions on this Page".
-   - Alternatively, use the keyboard shortcut **Alt+Shift+Q** (or **Option+Shift+Q** on Mac) to trigger processing without opening the popup.
-   - The extension will scrape all questions, send them to Gemini AI, and display suggested answers below each question.
-   - You can also refresh the AI answer for any question individually.
+| Feature | Description |
+|---------|-------------|
+| 🤖 **Full Autonomous Mode** | Navigates entire NetAcad modules — reads pages, skips videos, answers quizzes, and submits assessments automatically |
+| 🎯 **Quiz-Only Mode** | Focuses exclusively on detecting and answering quiz questions without navigating other content |
+| ⚡ **Beta Mode** | Instant scroll skip — bypasses reading material pages at maximum speed |
+| 🧠 **AI-Powered Answers** | Uses Google Gemini AI to analyze MCQ questions and select correct answers |
+| ✅ **Auto Answer Selection** | Automatically clicks radio buttons and checkboxes based on AI responses |
+| 📦 **Batch Processing** | Sends all questions on a page in a single API call to reduce latency and costs |
+| 🔑 **Multi-Key Rotation** | Supports multiple API keys — automatically rotates on quota exhaustion (429/403) |
+| 🎛️ **Model Selection** | Choose from Gemini 2.5 Flash, Flash-Lite, Pro Preview, 2.0 Flash, 1.5 Flash/Pro, or Gemma 2 |
+| 📤 **Auto Submit** | Clicks Submit once answers are selected, handles confirmation checkboxes on final assessments |
+| 🎬 **Video Fast-Forward** | Detects `<video>` elements and jumps to the last timestamp to mark as completed |
+| 📜 **Auto Scroll & Navigate** | Scrolls through reading pages and clicks "Next" / ">" arrows to advance modules |
+| ⏭️ **Matching Question Skip** | Automatically skips unreliable matching/ordering questions to save API credits |
+| 🕵️ **Stealth Mode** | Hides all AI overlay UI when autonomous mode is active — looks like a native user |
+| 🔍 **Shadow DOM Traversal** | Pierces through NetAcad's deeply nested Shadow DOM to find questions, buttons, and videos |
+| 👁️ **Developer Overlay** | Optional real-time status HUD showing bot state, current action, and quiz lock status |
+| 🔄 **MutationObserver** | Watches for dynamic page changes (AJAX/iframe loads) and re-scrapes automatically |
+| 🛡️ **State Machine Sync** | Prevents race conditions — won't submit while AI is still processing |
 
-## How It Works
-- **Content Scripts:** Injected into all frames on NetAcad pages, they detect and scrape questions from the page (including inside iframes).
-- **Batching:** All questions are sent in a single API call to Gemini, which returns a JSON array of answers. This reduces API usage and speeds up processing.
-- **MutationObserver:** Watches for changes in the quiz area (e.g., when navigating to a new question) and automatically re-scrapes and updates answers.
-- **Multi-Answer Support:** If a question requires multiple answers (e.g., checkboxes), the AI is instructed to return all correct answers, and the UI displays them as a list.
-- **Manual Refresh:** Each question's UI includes a "Refresh AI Answer" button for on-demand, per-question AI calls.
+---
 
-## API Key & Privacy
-- Your Gemini API key is stored locally in your browser's extension storage and is **never shared** with anyone except Google Gemini API.
-- You can remove or change your API key at any time via the extension popup.
+## 🚀 Quick Start
 
-## Planned Improvements
-- **Support for More Question Types:**
-  - Add detection and AI support for fill-in-the-blank, drag-and-drop, matching, and other interactive or open-ended question formats.
-  - Improve answer extraction and display for these new types.
-- **Improved Question Auto-Detection:**
-  - Make the question/answer scraping logic more robust to handle a wider variety of NetAcad layouts and future changes.
-  - Expand compatibility to similar e-learning platforms with different DOM structures.
-- **Smarter AI Prompts:**
-  - Dynamically adjust prompts based on question type for better answer accuracy.
-- **User Feedback and Customization:**
-  - Allow users to report missed questions or suggest improvements directly from the extension.
-- **Visiblity**
-  - Gives the ability for the user to show or not show the answer.
+### 1. Download
 
-## Examples
-![Screenshot 2025-06-04 224057](https://github.com/user-attachments/assets/04809880-60f5-4e72-a66a-5412529b1d81)
+```bash
+git clone https://github.com/A2-ashish/autonomous-bot.git
+```
 
-![Screenshot 2025-06-04 224126](https://github.com/user-attachments/assets/53845149-6347-42cc-88c6-096f35fd7d88)
+Or download the ZIP from the repository page.
 
+### 2. Get a Gemini API Key (Free)
 
-## Contributing
-Pull requests and suggestions are welcome! Please open an issue or PR for bug fixes, improvements, or new features.
+1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)
+2. Click **"Create API Key"**
+3. Copy the key
 
+> The free tier provides enough quota for normal usage. No billing required.
+
+### 3. Load in Chrome
+
+1. Go to `chrome://extensions/`
+2. Enable **Developer mode** (top right)
+3. Click **Load unpacked** → select the project folder
+4. Pin the extension for easy access
+
+### 4. Configure & Run
+
+1. Click the extension icon
+2. Paste your API key(s) — one per line for multi-key rotation
+3. Click **Save API Key**
+4. Enable your preferred mode:
+   - 🤖 **Full Autonomous Bot** — handles everything
+   - 🎯 **Quiz Only Mode** — just answers quizzes
+   - ⚡ **Beta Mode** — instant scroll skip
+5. Navigate to NetAcad — the bot starts automatically
+
+---
+
+## 🎛️ Configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **Gemini API Keys** | _(empty)_ | One or more API keys (one per line). Rotates automatically on quota errors |
+| **Show AI Answers** | ✅ On | Display AI answer suggestion overlays below each question |
+| **Process on Page Switch** | ✅ On | Auto re-scrape when navigating between questions |
+| **🤖 Full Autonomous Bot** | ❌ Off | Complete course autopilot — videos, reading, quizzes, navigation |
+| **🎯 Quiz Only Mode** | ❌ Off | Only detect and answer quiz questions |
+| **⚡ Beta Mode** | ❌ Off | Instant scroll skip for reading material |
+| **AI Model** | Gemini 2.5 Flash | Select from 7 available Gemini models |
+| **Developer Overlay** | ❌ Off | Show real-time bot status HUD on page |
+
+---
+
+## 🏗️ Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    Chrome Extension                       │
+│                                                           │
+│  ┌──────────┐  ┌───────────┐  ┌────────┐  ┌──────────┐  │
+│  │ popup.js │  │ content.js│  │ ui.js  │  │scraper.js│  │
+│  │ (Config) │  │ (Bot Loop)│  │(Select)│  │ (Extract)│  │
+│  └────┬─────┘  └─────┬─────┘  └───┬────┘  └────┬─────┘  │
+│       │              │             │             │        │
+│       │    ┌─────────▼──────────┐  │             │        │
+│       └───►│ chrome.storage.sync│◄─┘             │        │
+│            │  (Keys, Flags)     │                │        │
+│            └────────────────────┘                │        │
+│                      │                           │        │
+│            ┌─────────▼───────────────────────────▼───┐   │
+│            │        api.js (Gemini API Client)        │   │
+│            │   Multi-key rotation • Model selection   │   │
+│            └──────────────────┬───────────────────────┘   │
+└───────────────────────────────┼───────────────────────────┘
+                                │
+                     ┌──────────▼──────────┐
+                     │  Google Gemini API   │
+                     │  (configurable)      │
+                     └─────────────────────┘
+```
+
+---
+
+## 🔒 Safety Mechanisms
+
+| Mechanism | Purpose |
+|-----------|---------|
+| **State Lock** | Prevents submitting blank tests while AI is processing |
+| **Cooldown Timer** | 2-second buffer after answer selection for DOM updates |
+| **Navigation Cooldown** | 5-second wait after page transitions for content to load |
+| **Confirmation Guard** | Only checks confirmation checkboxes — never touches quiz answers |
+| **Disabled Button Guard** | Won't click disabled Submit buttons |
+| **Debounced Scraping** | 3-second debounce on MutationObserver to prevent rapid re-scraping |
+| **Loading Spinner Detection** | Pauses when page loading indicators are visible |
+
+---
+
+## ⌨️ Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Alt+Shift+Q` | Process questions on the current page (manual mode) |
+
+---
+
+## 📁 File Structure
+
+```
+netacad-autoanswer/
+├── manifest.json       # Chrome Extension config (Manifest V3)
+├── background.js       # Service worker for keyboard shortcuts
+├── content.js          # Bot loop, state machine, MutationObserver
+├── scraper.js          # Shadow DOM traversal, question extraction
+├── api.js              # Gemini API client with multi-key rotation
+├── ui.js               # Answer display, auto-selection, UI injection
+├── popup.html          # Extension popup UI
+├── popup.js            # Popup logic and chrome.storage sync
+├── features.md         # Detailed features & usage guide
+├── README.md           # This file
+├── CONTRIBUTING.md     # Contribution guidelines
+└── images/
+    ├── icon-48x48.png  # Extension icon
+    └── logo.png        # Project logo
+```
+
+---
+
+## 🔐 Privacy
+
+- API keys are stored **locally** in `chrome.storage.sync`
+- Keys are **never shared** with anyone except Google's Gemini API endpoint
+- No data is sent to any third-party server
+- All processing happens in your browser
+
+---
+
+## 🤝 Contributing
+
+Pull requests and suggestions are welcome! Please open an issue or PR for bug fixes, improvements, or new features. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
