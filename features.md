@@ -392,7 +392,7 @@ netacad-autoanswer/
 ├── features.md         # This file — features & usage guide
 ├── README.md           # Project overview
 ├── CONTRIBUTING.md     # Contribution guidelines
-├── LICENSE             # MIT License
+
 └── images/
     └── icon-48x48.png  # Extension icon
 ```
@@ -417,8 +417,3 @@ netacad-autoanswer/
 - **Google Gemini 2.5 Flash API** — AI-powered answer generation
 - **HTML5 Video API** — Video fast-forwarding
 
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.

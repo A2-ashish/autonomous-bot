@@ -78,5 +78,3 @@ This will allow you to:
 ## Contributing
 Pull requests and suggestions are welcome! Please open an issue or PR for bug fixes, improvements, or new features.
 
-## License
-MIT License. See [LICENSE](LICENSE) for details. 
