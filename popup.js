@@ -69,7 +69,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (result.aiModel) {
         modelSelect.value = result.aiModel;
       } else {
-        modelSelect.value = "gemini-2.5-flash"; // Default
+        modelSelect.value = "gemini-3.5-flash"; // Default
       }
     },
   );

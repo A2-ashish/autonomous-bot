@@ -5,7 +5,7 @@
 async function getActiveModelUrl() {
   return new Promise(resolve => {
     chrome.storage.sync.get(["aiModel"], (result) => {
-      const model = result.aiModel || "gemini-2.5-flash";
+      const model = result.aiModel || "gemini-3.5-flash";
       resolve(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`);
     });
   });
